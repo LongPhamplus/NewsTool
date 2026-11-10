@@ -1,0 +1,5 @@
+# Secrets are encrypted with age. Add another machine's public key to the list (comma separated),
+# then run `sops updatekeys <file>` on each encrypted file.
+creation_rules:
+  - path_regex: (\.env\.enc|config\.enc\.yaml)$
+    age: age1u0ctnsq9g47x6t5jsp4u2c69q2v29ze545ys6gxzj3zxqn92rvdqcmspvp

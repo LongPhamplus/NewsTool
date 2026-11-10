@@ -60,6 +60,31 @@ Tin phải: (1) chưa từng gửi (URL/tiêu đề), (2) đăng trong `max_age_
 Ví dụ chỉ nhận phốt và lỗ hổng: `/unsub tech security vn ai malware`.
 Tin khớp `watch` trong config luôn được đẩy và xếp lên đầu.
 
+## Quản lý secrets (SOPS + age)
+
+`.env` và `config.yaml` không được commit. Repo chỉ chứa bản mã hóa `.env.enc` và `config.enc.yaml`.
+Ai có khóa age trong `.sops.yaml` mới giải mã được.
+
+```bash
+./secrets.sh encrypt     # sau khi sửa .env / config.yaml -> commit .env.enc, config.enc.yaml
+./secrets.sh decrypt     # tạo lại .env, config.yaml (file khác bản mã hóa được lưu .bak)
+sops edit --input-type dotenv --output-type dotenv .env.enc   # sửa trực tiếp bản mã hóa
+```
+
+**Khóa bí mật** nằm ở `~/.config/sops/age/keys.txt`. Hãy cất bản sao trong trình quản lý mật khẩu:
+mất khóa này là không giải mã được nữa.
+
+**Cài trên máy mới:**
+1. Cài [sops](https://github.com/getsops/sops/releases) và [age](https://github.com/FiloSottile/age/releases)
+   vào `~/.local/bin` (Kali/Debian có `apt install age`).
+2. Lấy khóa: chép `keys.txt` từ trình quản lý mật khẩu vào `~/.config/sops/age/keys.txt`, rồi `chmod 600`.
+   Hoặc cho máy mới khóa riêng: chạy `age-keygen -o ~/.config/sops/age/keys.txt` trên máy mới. Trên máy cũ,
+   thêm public key mới vào `.sops.yaml` (cách nhau bằng dấu phẩy), chạy `./secrets.sh updatekeys`, commit và push.
+3. `git clone … && cd NewsTool && ./secrets.sh decrypt && uv sync`
+4. `uv run newstool tg-login`. Không chép `newstool.session` giữa các máy: mỗi máy cần phiên đăng nhập riêng.
+5. Chỉ chạy bot trên **một máy** tại một thời điểm, vì cùng token sẽ báo lỗi `Conflict` và gửi trùng tin.
+   Tắt service trên máy cũ (`systemctl --user disable --now newstool`) trước khi bật ở máy mới.
+
 ## Theo dõi Telegram channel (real-time)
 Dùng tài khoản Telegram của bạn (Telethon) để nhận tin ngay khi channel đăng, và tìm trong channel qua `/search`.
 1. Vào https://my.telegram.org → *API development tools* → tạo app, điền `TG_API_ID`, `TG_API_HASH` vào `.env`.

@@ -5,3 +5,5 @@ config.yaml
 __pycache__/
 *.session
 *.session-journal
+*.bak
+*.new
