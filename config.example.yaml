@@ -1,0 +1,142 @@
+# Copy file này thành config.yaml rồi chỉnh theo ý.
+
+poll_minutes: 3           # chu kỳ lấy RSS (nguồn không đổi trả 304, gần như không tốn gì)
+intel_poll_minutes: 15    # chu kỳ lấy ransomware.live / HIBP / CISA KEV (API có giới hạn tần suất)
+max_age_hours: 48         # tin cũ hơn mức này sẽ không được đẩy
+max_per_push: 40          # số tin tối đa mỗi lần đẩy (phần thừa bị bỏ, kèm thông báo)
+state_path: state.db      # chỉ lưu dấu vết tin đã gửi (hash URL/tiêu đề, tự xóa sau 7 ngày)
+
+# category: tag gốc của nguồn (security / tech). lang: vi -> thêm tag "vn".
+feeds:
+  # --- An ninh bảo mật ---
+  - { name: The Hacker News,  url: https://feeds.feedburner.com/TheHackersNews, category: security }
+  - { name: BleepingComputer, url: https://www.bleepingcomputer.com/feed/,      category: security }
+  - { name: Krebs on Security, url: https://krebsonsecurity.com/feed/,          category: security }
+  - { name: SecurityWeek,     url: https://www.securityweek.com/feed/,          category: security }
+  - { name: The Record,       url: https://therecord.media/feed,                category: security }
+  - { name: Dark Reading,     url: https://www.darkreading.com/rss.xml,         category: security }
+  - { name: DataBreaches.net, url: https://databreaches.net/feed/,              category: security }
+  - { name: Schneier,         url: https://www.schneier.com/feed/atom/,         category: security }
+  # --- Cộng đồng ---
+  # Reddit chặn request song song -> gộp nhiều subreddit vào 1 URL, poll thưa hơn
+  - { name: Reddit netsec+cybersecurity, url: "https://www.reddit.com/r/netsec+cybersecurity/.rss", category: security, every_minutes: 10 }
+  # --- Công nghệ ---
+  - { name: Hacker News 300+, url: "https://hnrss.org/frontpage?points=300",    category: tech }
+  - { name: Ars Technica,     url: https://feeds.arstechnica.com/arstechnica/index, category: tech }
+  - { name: The Verge,        url: https://www.theverge.com/rss/index.xml,      category: tech }
+  - { name: TechCrunch,       url: https://techcrunch.com/feed/,                category: tech }
+  # --- Tiếng Việt ---
+  - { name: VnExpress Số hóa, url: https://vnexpress.net/rss/so-hoa.rss,        category: tech, lang: vi }
+  - { name: Tuổi Trẻ Nhịp sống số, url: https://tuoitre.vn/rss/nhip-song-so.rss, category: tech, lang: vi }
+
+# Gắn tag theo từ khóa (không phân biệt hoa thường).
+# "từ" = khớp nguyên từ; "từ*" = khớp tiền tố (leak* -> leak, leaked, leaks).
+rules:
+  incident:   # phốt / sự cố
+    - breach*
+    - leak*
+    - hacked
+    - ransomware
+    - extortion
+    - stolen
+    - stole
+    - theft
+    - heist
+    - settle*
+    - fined
+    - compromised
+    - outage
+    - lawsuit
+    - sued
+    - scandal
+    - backlash
+    - layoff*
+    - exposed
+    - rò rỉ
+    - lộ dữ liệu
+    - lộ lọt
+    - bị hack
+    - bị tấn công
+    - tống tiền
+    - lừa đảo
+    - sập
+    - gián đoạn
+    - bê bối
+    - bị phạt
+    - khởi kiện
+    - sa thải
+    - phốt
+  vuln:
+    - cve-*
+    - zero-day
+    - 0-day
+    - vulnerabilit*
+    - exploit*
+    - rce
+    - remote code execution
+    - lỗ hổng
+    - bản vá
+  malware:
+    - malware
+    - phishing
+    - trojan
+    - botnet
+    - spyware
+    - stealer
+    - backdoor
+    - mã độc
+  ai:
+    - ai
+    - llm*
+    - openai
+    - anthropic
+    - claude
+    - chatgpt
+    - gemini
+    - trí tuệ nhân tạo
+
+# Cách thông báo:
+#   - tin có tag trong "important" -> gửi ngay, có âm báo
+#   - tin còn lại -> gom lại, gửi im lặng mỗi digest_minutes phút (0 = gửi ngay mọi tin)
+notify:
+  important: [watch, ransomware, kev, breach, incident, vuln, malware]
+  digest_minutes: 60
+
+# Nguồn threat intel tự động theo dõi mỗi lần poll (chỉ metadata, không tải dữ liệu rò rỉ):
+intel:
+  ransomware: true            # ransomware.live: nạn nhân mới trên leak site
+  ransomware_countries: [VN]  #   chỉ báo nạn nhân ở các nước này (+ khớp watchlist)
+  breaches: true              # HaveIBeenPwned: vụ rò rỉ dữ liệu mới được xác minh
+  kev: true                   # CISA KEV: lỗ hổng mới bị khai thác thực tế
+
+# Theo dõi Telegram channel real-time bằng tài khoản của bạn (cần TG_API_ID/TG_API_HASH trong .env
+# và đăng nhập 1 lần: `uv run newstool tg-login`).
+# filter: bỏ trống = mọi tin; watch = chỉ tin khớp watchlist; [từ khóa] = khớp từ khóa hoặc watchlist.
+telegram:
+  enabled: true
+  auto_join: true     # tự tham gia channel để nhận real-time, rồi tắt tiếng + lưu trữ (điện thoại không kêu)
+  session: newstool   # file newstool.session – giữ bí mật, nó cho phép truy cập tài khoản Telegram
+  channels:
+    - { username: thehackernews,          category: security }
+    - { username: bleepingcomputer,       category: security }
+    - { username: Cyber_Security_Channel, category: security }
+    - { username: vxunderground,          category: security }
+    # Leak site ransomware toàn cầu (~1 tin/giờ): chỉ báo nạn nhân VN hoặc khớp watchlist
+    - { username: RansomLook, category: security, tags: [ransomware, incident], filter: [".vn", vietnam, việt nam] }
+    # Mọi CVE mới (~20 tin/giờ): chỉ báo CVE khớp watchlist
+    - { username: cveNotify,  category: security, filter: watch }
+    # --- Tiếng Việt ---
+    # Chongluadao.vn: cảnh báo lừa đảo, phishing, tên miền giả mạo
+    - { username: cld_report,          category: security, lang: vi, tags: [incident] }
+    # Threat intel về Việt Nam: rò rỉ dữ liệu, ransomware, tin tặc rao bán dữ liệu
+    - { username: Cyber_Ti_Reports_VN, category: security, lang: vi, tags: [incident] }
+    # Administration & Security VN: cảnh báo lỗ hổng (gửi ngay) + tài liệu sysadmin/bảo mật (vào tóm tắt)
+    - { username: AdSecVN,             category: security, lang: vi }
+
+# Từ khóa bạn quan tâm đặc biệt (sản phẩm đang dùng, công ty, ngân hàng...).
+# Tin khớp sẽ có 🔔, luôn được đẩy dù bạn đã tắt topic, và xếp lên đầu.
+watch:
+  - fpt
+  - fortinet
+  - vietcombank
+  - chrome
