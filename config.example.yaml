@@ -12,7 +12,7 @@ feeds:
   # --- An ninh bảo mật ---
   - { name: The Hacker News,  url: https://feeds.feedburner.com/TheHackersNews, category: security }
   - { name: BleepingComputer, url: https://www.bleepingcomputer.com/feed/,      category: security }
-  - { name: Krebs on Security, url: https://krebsonsecurity.com/feed/,          category: security }
+  - { name: Krebs on Security, url: "https://feeds.feedburner.com/KrebsOnSecurity", category: security }  # trang gốc chặn IP: dùng bản FeedBurner
   - { name: SecurityWeek,     url: https://www.securityweek.com/feed/,          category: security }
   - { name: The Record,       url: https://therecord.media/feed,                category: security }
   - { name: Dark Reading,     url: https://www.darkreading.com/rss.xml,         category: security }
@@ -41,9 +41,6 @@ feeds:
   # --- Trung Quốc (cert.360.cn không dùng được: chứng chỉ SSL hết hạn từ 07/2024) ---
   - { name: Anquanke 安全客,  url: https://api.anquanke.com/data/v1/rss,        category: security, lang: zh, every_minutes: 15, alert: local }
   - { name: Seebug Paper,     url: https://paper.seebug.org/rss/,              category: security, lang: zh, every_minutes: 30, alert: local }
-  # --- Cộng đồng ---
-  # Reddit chặn request song song -> gộp nhiều subreddit vào 1 URL, poll thưa hơn
-  - { name: Reddit netsec+cybersecurity, url: "https://www.reddit.com/r/netsec+cybersecurity/.rss", category: security, every_minutes: 10 }
   # --- Công nghệ ---
   - { name: Hacker News 300+, url: "https://hnrss.org/frontpage?points=300",    category: tech }
   - { name: Ars Technica,     url: https://feeds.arstechnica.com/arstechnica/index, category: tech }

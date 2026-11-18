@@ -50,7 +50,8 @@ def _due(feed) -> bool:
 
 async def fetch_feeds(cfg: Config, state: State, clf: Classifier, force: bool = False) -> list[dict]:
     new = []
-    for feed, res in await fetch_all([f for f in cfg.feeds if force or _due(f)]):
+    feeds = [f for f in cfg.feeds if force or _due(f)]
+    for feed, res in await fetch_all(feeds):
         if isinstance(res, Exception):
             log.warning("feed %s lỗi: %r", feed.name, res)
             _status(feed.name, error=repr(res))

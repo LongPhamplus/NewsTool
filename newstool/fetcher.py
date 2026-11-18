@@ -84,7 +84,15 @@ async def fetch_feed(client: httpx.AsyncClient, feed: Feed) -> list[dict] | None
     return items
 
 
-HOST_GAP = 2.0  # seconds between requests to the same host (Reddit answers 429 to parallel hits)
+HOST_GAP = 2.0  # seconds between requests to the same host (some sites answer 429 to parallel hits)
+RETRY_AFTER = 3.0
+
+
+def _transient(e: Exception) -> bool:
+    """Network hiccups and server errors are worth one retry; 403/404 are not."""
+    if isinstance(e, httpx.TransportError):
+        return True
+    return isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500
 
 
 async def fetch_all(feeds: list[Feed]) -> list[tuple[Feed, list[dict] | None | Exception]]:
@@ -98,11 +106,17 @@ async def fetch_all(feeds: list[Feed]) -> list[tuple[Feed, list[dict] | None | E
         for n, f in enumerate(group):
             if n:
                 await asyncio.sleep(HOST_GAP)
-            try:
-                results[id(f)] = await fetch_feed(client, f)
-            except Exception as e:
-                results[id(f)] = e
+            for attempt in range(2):
+                try:
+                    results[id(f)] = await fetch_feed(client, f)
+                    break
+                except Exception as e:
+                    results[id(f)] = e
+                    if attempt or not _transient(e):
+                        break
+                    await asyncio.sleep(RETRY_AFTER)
 
-    async with httpx.AsyncClient(headers=HEADERS, timeout=20, follow_redirects=True) as client:
+    timeout = httpx.Timeout(25, connect=15)
+    async with httpx.AsyncClient(headers=HEADERS, timeout=timeout, follow_redirects=True) as client:
         await asyncio.gather(*(run_host(client, g) for g in by_host.values()))
     return [(f, results[id(f)]) for f in feeds]
