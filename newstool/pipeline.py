@@ -13,6 +13,20 @@ log = logging.getLogger(__name__)
 
 # In-memory source health for /sources: name -> {"at", "error", "count", "unchanged"}
 STATUS: dict[str, dict] = {}
+# In-memory index of recent items (RSS + Telegram) so /search can look through them. Never written to disk.
+RECENT: dict[str, dict] = {}
+RECENT_DAYS, RECENT_MAX = 7, 6000
+
+
+def remember(items: list[dict]) -> None:
+    for i in items:
+        RECENT[i["uid"]] = i
+    if len(RECENT) > RECENT_MAX:
+        cutoff = time.time() - RECENT_DAYS * 86400
+        for uid in [u for u, i in RECENT.items() if i["published"] < cutoff]:
+            del RECENT[uid]
+        while len(RECENT) > RECENT_MAX:  # dicts keep insertion order: drop the oldest inserted
+            del RECENT[next(iter(RECENT))]
 
 
 def _status(name: str, error: str | None = None, count: int = 0, unchanged: bool = False) -> None:
@@ -47,6 +61,8 @@ async def fetch_feeds(cfg: Config, state: State, clf: Classifier, force: bool = 
             continue
         for item in res:
             item["tags"] = clf.tags(item["title"], item["summary"], feed.category, feed.lang)
+            item["alert"] = feed.alert
+        remember(res)
         new += _accept(cfg, state, feed.name, res)
         _status(feed.name, count=len(res))
     return new

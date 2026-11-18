@@ -8,19 +8,20 @@ from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
 from .classify import Classifier
 from .config import Config
-from .formatter import (EMOJI, ago, format_breach, format_cve, format_exploit, format_ghsa, format_hn,
-                        format_infostealer, format_item, format_lookalike, format_messages, format_news_line, format_victim,
-                        pack, rank)
-from .intel import (RateLimited, search_breaches, search_cves, search_exploits, search_gdelt, search_ghsa,
-                    search_hn, search_infostealer, search_lookalikes, search_news, search_ransomware)
-from .pipeline import STATUS, fetch_feeds, fetch_intel, muted, select, subscribed
+from .formatter import EMOJI, ago, format_messages, pack
+from .intel import RateLimited
+from .query import parse
+from .research import research
+from .search import smart_search
+from .pipeline import STATUS, remember, fetch_feeds, fetch_intel, muted, select, subscribed
 from .state import State
 
 log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 HELP = """<b>NewsTool</b> – tin công nghệ &amp; bảo mật
-/search &lt;từ khóa&gt; – tra cứu tổng hợp: leak site ransomware, rò rỉ dữ liệu (HIBP), CVE (NVD + CISA KEV), Google News VI/EN, Hacker News
+/search &lt;từ khóa&gt; – tra cứu tổng hợp: leak site ransomware, infostealer, rò rỉ dữ liệu, domain giả mạo, CVE, tin tức, Telegram
+/search --research &lt;CVE hoặc tên lỗ hổng&gt; (hoặc /research) – nghiên cứu sâu 1 lỗ hổng: CVSS, EPSS, KEV, phiên bản bị ảnh hưởng, bản vá, PoC/exploit, bài phân tích, tin tức, mạng xã hội. VD: <code>/research react2shell</code>, <code>/research CVE-2021-44228</code>
 /topics – xem các topic đang bật
 /sub &lt;tag&gt; · /unsub &lt;tag&gt; – bật/tắt topic
 /fetch – lấy tin ngay
@@ -52,7 +53,8 @@ async def deliver(app: Application, items: list[dict], header: str | None = None
     cfg, state = app.bot_data["cfg"], app.bot_data["state"]
     wanted = select(cfg, state, items)
     if cfg.digest_minutes > 0:
-        urgent = [i for i in wanted if cfg.important_tags.intersection(i["tags"])]
+        urgent = [i for i in wanted if cfg.important_tags.intersection(i["tags"])
+                  and (i.get("alert", "all") == "all" or {"watch", "vn"}.intersection(i["tags"]))]
         app.bot_data["digest"].extend(i for i in wanted if i not in urgent)
     else:
         urgent = wanted
@@ -69,6 +71,7 @@ async def deliver(app: Application, items: list[dict], header: str | None = None
 async def on_telegram_items(app: Application, items: list[dict]) -> None:
     """Called by the Telegram watcher the moment a monitored channel posts."""
     state = app.bot_data["state"]
+    remember(items)
     async with app.bot_data["lock"]:
         new = [i for i in items if state.mark(i["uid"], i["title_key"])]
         state.commit()
@@ -133,84 +136,41 @@ def _err(e: Exception) -> str:
     return str(e) if isinstance(e, RateLimited) else f"lỗi: {type(e).__name__}"
 
 
+RESEARCH_FLAGS = {"--research", "--reseach", "--reasearch", "-r"}
+
+
+async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str | None = None) -> None:
+    query = (query if query is not None else " ".join(context.args)).strip()
+    if not query:
+        await update.message.reply_html(
+            "Dùng: /research &lt;CVE hoặc tên lỗ hổng&gt;\nVD: <code>/research CVE-2025-55182</code>, "
+            "<code>/research react2shell</code>, <code>/research log4shell</code>, <code>/research spring4shell</code>")
+        return
+    await update.message.reply_text(f"🔬 Đang nghiên cứu '{query}' trên ~15 nguồn, có thể mất 20–60 giây...")
+    blocks = await research(query, context.bot_data.get("tg"))
+    await _send(context.bot, update.effective_chat.id, pack(blocks))
+
+
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg, _ = _ctx(context)
-    kw = " ".join(context.args).strip()
-    if not kw:
-        await update.message.reply_html(
-            "Dùng: /search &lt;từ khóa&gt;\nVD: <code>/search FPT</code>, <code>/search vietcombank.com.vn</code>, "
-            "<code>/search fortinet</code>, <code>/search Vietcombank lừa đảo</code>\n"
-            "Từ đầu tiên là tên tổ chức/sản phẩm (hoặc domain) để tra leak site, infostealer, rò rỉ, domain giả mạo.")
+    args = list(context.args)
+    if args and args[0].lower() in RESEARCH_FLAGS:
+        await cmd_research(update, context, " ".join(args[1:]))
         return
-    watcher = context.bot_data.get("tg")
-    n_src = 13 + (1 if watcher else 0)
-    await update.message.reply_text(f"🔎 Đang tìm '{kw}' trên {n_src} nguồn, có thể mất 20–40 giây...")
-    entity = kw.split()[0].lower()
-    brand = entity.split(".")[0]
-    guesses = [entity] if "." in entity else [f"{entity}.{tld}" for tld in ("com", "vn", "com.vn")]
-
-    async def run(lookups: dict) -> dict:
-        lookups = {k: v for k, v in lookups.items() if v is not None}
-        return dict(zip(lookups, await asyncio.gather(*lookups.values(), return_exceptions=True)))
-
-    res = await run({
-        "victims": search_ransomware(brand) if cfg.ransomware else None,
-        "breaches": search_breaches(brand) if cfg.breaches else None,
-        "lookalike": search_lookalikes(brand),
-        "cves": search_cves(kw), "ghsa": search_ghsa(kw), "exploits": search_exploits(kw),
-        "vi": search_news(kw, "vi", 6), "en": search_news(kw, "en", 6), "gdelt": search_gdelt(kw),
-        "hn": search_hn(kw),
-        "tg": watcher.search(kw) if watcher else None,
-        **{f"hr:{d}": search_infostealer(d) for d in guesses},
-    })
-    # Leak sites / HIBP reveal the organisation's real domains (e.g. fptsoftware.com): check those too.
-    found = {x["domain"].lower() for key in ("victims", "breaches") if isinstance(res.get(key), list)
-             for x in res[key] if x.get("domain")}
-    extra = sorted(found - set(guesses))[:2]
-    res.update(await run({f"hr:{d}": search_infostealer(d) for d in extra}))
-
-    blocks = [f"🔎 <b>{html.escape(kw)}</b>"]
-
-    def section(key: str, title: str, fmt, limit: int, empty: str | None = None, joined: bool = False,
-                items=None):
-        r = res.get(key) if items is None else items
-        if r is None:
-            return
-        if isinstance(r, Exception):
-            blocks.append(f"{title}: <i>{html.escape(_err(r))}</i>")
-        elif r:
-            more = f" ({len(r)})" if len(r) > 1 else ""
-            if joined:
-                blocks.append(f"{title}{more}\n" + "\n".join(fmt(x) for x in r[:limit]))
-            else:
-                blocks.append(title + more)
-                blocks.extend(fmt(x) for x in r[:limit])
-        elif empty:
-            blocks.append(f"{title}: <i>{empty}</i>")
-
-    e = html.escape(brand)
-    hr = [v for k, v in res.items() if k.startswith("hr:")]
-    hr_hits = sorted((v for v in hr if isinstance(v, dict)), key=lambda h: -h["total"])
-    hr_items = hr_hits if hr_hits or not all(isinstance(v, Exception) for v in hr) else hr[0]
-    own = set(guesses) | found
-    look = res.get("lookalike")
-    if isinstance(look, list):  # hide the organisation's own (sub)domains
-        look = [d for d in look if not any(d["host"] == o or d["host"].endswith("." + o) for o in own)]
-
-    section("victims", "🏴‍☠️ <b>Leak site ransomware</b>", format_victim, 5, f"không thấy '{e}'")
-    section("hr", "🕵️ <b>Infostealer (Hudson Rock)</b>", format_infostealer, 4,
-            "không thấy " + ", ".join(guesses + extra), items=hr_items)
-    section("breaches", "💧 <b>Rò rỉ dữ liệu (HIBP)</b>", format_breach, 5, f"không thấy '{e}'")
-    section("lookalike", f"🎣 <b>Domain mới chứa '{e}' (30 ngày, có thể giả mạo)</b>", format_lookalike, 12,
-            "không có", joined=True, items=look)
-    section("cves", "🐞 <b>CVE 120 ngày qua (NVD)</b>", format_cve, 5)
-    section("ghsa", "📦 <b>GitHub Advisories</b>", format_ghsa, 4)
-    section("exploits", "💣 <b>Exploit công khai (Exploit-DB)</b>", format_exploit, 5, joined=True)
-    section("vi", "📰 <b>Tin tức (VI)</b>", format_news_line, 6, joined=True)
-    section("en", "📰 <b>News (EN)</b>", format_news_line, 6, joined=True)
-    section("gdelt", "🌍 <b>Báo chí quốc tế (GDELT)</b>", format_news_line, 6, joined=True)
-    section("hn", "💬 <b>Thảo luận Hacker News</b>", format_hn, 5, joined=True)
-    section("tg", "📢 <b>Telegram channels</b>", format_item, 6)
+    text = " ".join(args).strip()
+    if not text:
+        await update.message.reply_html(
+            "Dùng: /search &lt;câu hỏi tự nhiên&gt; [--days N]\nVD: <code>/search vụ FPT bị tấn công ransomware</code>, "
+            "<code>/search Vietcombank lừa đảo</code>, <code>/search vietcombank.com.vn</code>, "
+            "<code>/search akira</code> (nhóm ransomware), <code>/search rò rỉ dữ liệu Việt Nam --days 30</code>, "
+            "<code>/search fortinet lỗ hổng</code>\nTên lỗ hổng/CVE (react2shell, CVE-…) tự chuyển sang /research.")
+        return
+    q = parse(text)
+    if q.kind in ("cve", "vuln"):  # a vulnerability is best served by the research view
+        await cmd_research(update, context, q.entity)
+        return
+    await update.message.reply_html(f"🔎 Đang tìm… {q.describe() or html.escape(text)} (20–40 giây)")
+    _, blocks = await smart_search(text, cfg, context.bot_data.get("tg"))
     await _send(context.bot, update.effective_chat.id, pack(blocks))
 
 
@@ -298,19 +258,24 @@ async def _start_telegram(app: Application) -> None:
     app.bot_data["tg"] = watcher
 
 
-async def _stop_telegram(app: Application) -> None:
+async def _flush_on_stop(app: Application) -> None:
     # The digest buffer lives in memory only: send it before shutting down instead of losing it.
+    # Runs in post_stop, while the bot's HTTP client is still open (post_shutdown is too late).
     try:
         if app.bot_data.get("cfg") and app.bot_data["cfg"].chat_id and app.bot_data.get("digest"):
             await flush_digest(app)
     except Exception:
         log.exception("gửi tóm tắt khi tắt bot thất bại")
+
+
+async def _stop_telegram(app: Application) -> None:
     if watcher := app.bot_data.get("tg"):
         await watcher.stop()
 
 
 def build(cfg: Config) -> Application:
-    app = Application.builder().token(cfg.token).post_init(_start_telegram).post_shutdown(_stop_telegram).build()
+    app = (Application.builder().token(cfg.token).post_init(_start_telegram)
+           .post_stop(_flush_on_stop).post_shutdown(_stop_telegram).build())
     app.bot_data.update(
         cfg=cfg, state=State(cfg.state_path), clf=Classifier(cfg.rules, cfg.watch), lock=asyncio.Lock(), digest=[])
     app.add_handler(CommandHandler("start", cmd_start))
@@ -318,7 +283,7 @@ def build(cfg: Config) -> Application:
         log.warning("TELEGRAM_CHAT_ID chưa đặt: gửi /start cho bot để lấy chat id.")
         return app
     owner = filters.Chat(chat_id=cfg.chat_id)  # bot chỉ trả lời bạn
-    for name, fn in [("help", cmd_help), ("search", cmd_search),
+    for name, fn in [("help", cmd_help), ("search", cmd_search), ("research", cmd_research),
                      ("topics", cmd_topics), ("sub", cmd_sub), ("unsub", cmd_unsub),
                      ("fetch", cmd_fetch), ("digest", cmd_digest), ("sources", cmd_sources)]:
         app.add_handler(CommandHandler(name, fn, filters=owner))

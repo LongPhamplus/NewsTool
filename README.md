@@ -22,7 +22,8 @@ Kiểm tra các nguồn mà không cần Telegram: `uv run newstool check-feeds`
 
 | Lệnh | Tác dụng |
 |---|---|
-| `/search <từ khóa>` | Tra cứu tổng hợp (xem bên dưới) |
+| `/search <câu hỏi>` | Tìm kiếm thông minh (xem bên dưới) |
+| `/search --research <CVE hoặc tên lỗ hổng>` hay `/research …` | Nghiên cứu sâu một lỗ hổng (xem bên dưới) |
 | `/topics`, `/sub <tag>`, `/unsub <tag>` | Bật/tắt topic được đẩy tự động |
 | `/fetch` | Lấy tin ngay |
 | `/digest` | Gửi ngay bản tóm tắt tin thường đang chờ |
@@ -31,27 +32,74 @@ Kiểm tra các nguồn mà không cần Telegram: `uv run newstool check-feeds`
 **Tag:** `security` 🛡, `tech` 💻, `vn` 🇻🇳, `incident` 🔥 (phốt/sự cố), `vuln` 🐞, `malware` 🦠, `ai` 🤖,
 `ransomware` 🏴‍☠️, `breach` 💧, `kev` ⚠️, `watch` 🔔.
 
-### `/search` – tra cứu tổng hợp 13 nguồn
-`/search FPT`, `/search vietcombank.com.vn`, `/search fortinet`, `/search Vietcombank lừa đảo`.
-Từ đầu tiên là tên tổ chức/sản phẩm hoặc domain. Mất khoảng 20–40 giây.
+### `/search` – tìm kiếm thông minh
+Gõ câu hỏi tự nhiên, tiếng Việt hoặc tiếng Anh. Mất khoảng 10–25 giây.
+
+```
+/search vụ FPT bị tấn công ransomware
+/search Vietcombank lừa đảo
+/search lộ dữ liệu khách hàng Thế Giới Di Động
+/search vietcombank.com.vn
+/search akira                          (nhóm ransomware -> hồ sơ nhóm)
+/search rò rỉ dữ liệu Việt Nam --days 30
+/search fortinet lỗ hổng
+```
+
+**Bot hiểu câu hỏi:**
+- Tách **đối tượng** (tổ chức, sản phẩm, domain, nhóm ransomware, quốc gia) khỏi **chủ đề** (ransomware, rò rỉ,
+  lừa đảo, tấn công, lỗ hổng, mã độc) và bỏ các từ thừa ("vụ", "bị", "tin tức mới nhất"…).
+- Tự bỏ dấu để tra domain và leak site: "Thế Giới Di Động" thành `thegioididong.com`.
+- Mã CVE hoặc tên lỗ hổng (react2shell, citrixbleed…) tự chuyển sang `/research`.
+- Dòng 🧠 "Hiểu là" ở đầu kết quả cho biết bot đã hiểu câu hỏi thế nào.
+
+**Xếp hạng tin:**
+- Tin từ mọi nguồn được gộp lại và chấm điểm theo: đối tượng có trong tiêu đề, khớp chủ đề, ngữ cảnh an ninh mạng và độ mới.
+- Bài trùng nhau ở nhiều báo được gộp làm một, ghi "+N nguồn".
+- Tin nhiễu bị loại: chứng khoán, thể thao, "tấn công thị trường", "rò rỉ nhiên liệu"…
 
 | Mục | Nguồn | Nội dung |
 |---|---|---|
-| 🏴‍☠️ | ransomware.live | Nạn nhân trên leak site ransomware (metadata) |
+| 🏴‍☠️ | ransomware.live | Nạn nhân trên leak site; hồ sơ nhóm (công cụ, ATT&CK, quốc gia bị nhắm, nạn nhân VN) |
 | 🕵️ | Hudson Rock | Số tài khoản của domain bị infostealer lấy cắp (chỉ thống kê) |
 | 💧 | HaveIBeenPwned | Vụ rò rỉ dữ liệu đã xác minh |
+| 💾 | RansomLook | CSDL bị lộ trên dark web: tên, số bản ghi, dung lượng, tên cột (**chỉ metadata**) |
 | 🎣 | crt.sh | Domain mới (30 ngày) chứa tên thương hiệu, có thể là giả mạo |
-| 🐞 | NVD + CISA KEV + Exploit-DB | CVE 120 ngày, ⚠️ đang bị khai thác, 💣 đã có exploit công khai |
-| 📦 | GitHub Advisories | Lỗ hổng thư viện mã nguồn mở |
-| 💣 | Exploit-DB | Exploit công khai |
-| 📰🌍 | Google News VI/EN, GDELT | Báo chí trong nước và quốc tế |
-| 💬 | Hacker News | Thảo luận kỹ thuật |
+| 📰 | Google News VI/EN, Bing News, GDELT, Hacker News, Telegram channel, **toàn bộ tin RSS 7 ngày gần nhất** | Tin liên quan, đã xếp hạng |
+| 🌑 | Dark Web Informer, Daily Dark Web, DataBreaches, HackRead, Cybernews, DeXpose… | Tin về leak site, forum, chợ đen |
+| 🐞📦💣 | NVD + CISA KEV, GitHub Advisories, Exploit-DB | CVE, advisory, exploit (khi hỏi về lỗ hổng hoặc sản phẩm) |
+
+Bot không truy cập trang .onion và không tải dữ liệu bị lộ: chỉ dùng các trang theo dõi dark web công khai.
+Tin RSS gần đây chỉ nằm trong bộ nhớ của bot (không ghi ra đĩa) và mất khi bot khởi động lại.
+cert.360.cn không dùng được: chứng chỉ SSL của trang đã hết hạn từ 07/2024. Nguồn Trung Quốc hiện có: Anquanke, Seebug.
+
+### `/research` – nghiên cứu sâu một lỗ hổng
+`/research react2shell`, `/research log4shell`, `/research spring4shell`, `/research CVE-2025-55182`,
+hoặc `/search --research …` (chấp nhận cả `--reseach`, `-r`). Mất khoảng 15–40 giây.
+
+Với **tên gọi** (React2Shell, Log4Shell…), bot tìm trên tin tức, HN, GitHub, Exploit-DB và Telegram, đếm mã CVE
+được nhắc nhiều nhất để xác định lỗ hổng. Các CVE liên quan khác được liệt kê để tra tiếp.
+
+| Mục | Nguồn |
+|---|---|
+| 🧬 Tổng quan: CVSS, vector, CWE, mô tả, CNA | NVD + bản ghi CVE chính thức (MITRE, có cả khi NVD chưa phân tích) |
+| 📊 Mức độ nguy hiểm | CISA KEV (đang bị khai thác, dùng trong ransomware), EPSS (xác suất bị khai thác 30 ngày), CISA SSVC, CIRCL (số lần ghi nhận bị khai thác / PoC / được nhắc) |
+| 📦 Phạm vi ảnh hưởng & bản vá | Phiên bản bị ảnh hưởng (CNA), gói và phiên bản vá (GitHub Advisory) |
+| 🩹 Advisory | Link vendor advisory, patch (NVD) |
+| 💣 Exploit / PoC | Exploit-DB, Nuclei template, repo GitHub nhiều sao, trickest/cve |
+| 🔬 Phân tích kỹ thuật | Bài viết được NVD/trickest gắn nhãn exploit, technical description… |
+| 📰💬📢🗣 | Google + Bing News, tin VI, Hacker News, Telegram channel, mạng xã hội (Bluesky, Mastodon, Telegram qua CIRCL) |
+| 🔗 | Link nhanh: NVD, CVE.org, CIRCL, AttackerKB, Vulners, GitHub code search |
+
+Repo PoC chỉ được **liệt kê link**, bot không tải hay chạy gì. Nhiều repo "PoC" giả chứa mã độc: chỉ thử trong máy ảo/lab.
+Nên đặt `GITHUB_TOKEN` (fine-grained, không cần quyền) trong `.env` để tránh bị GitHub giới hạn khi tra nhiều.
 
 ### Khi nào bot thông báo?
 Tin phải: (1) chưa từng gửi (URL/tiêu đề), (2) đăng trong `max_age_hours`, (3) có tag đang bật (`/topics`) hoặc khớp `watch`.
 - 🚨 **Gửi ngay, có âm báo**: tin có tag trong `notify.important` (watch, ransomware, kev, breach, incident, vuln, malware).
 - 🗞 **Tóm tắt im lặng** mỗi `notify.digest_minutes` phút: các tin còn lại. `/digest` để nhận ngay.
   Đặt `digest_minutes: 0` để mọi tin đều gửi ngay.
+- Nguồn ra nhiều bài (CERT, blog threat research, tin dark web, nguồn Trung Quốc) có `alert: local`: chỉ báo ngay
+  khi tin nói về Việt Nam (tiếng Việt, "Vietnam", tên miền `.vn`) hoặc khớp watchlist; còn lại vào bản tóm tắt.
 
 ### Theo dõi tự động (mục `intel` trong config)
 - 🏴‍☠️ Nạn nhân ransomware mới ở VN hoặc khớp watchlist

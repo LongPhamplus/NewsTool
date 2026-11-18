@@ -1,11 +1,13 @@
 """Threat-intel & news lookups from free public APIs (metadata only, no leaked data)."""
 import asyncio
 import calendar
+import collections
 import html
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote, quote_plus
+from urllib.parse import parse_qs, quote, quote_plus, urlparse
 
 import feedparser
 import httpx
@@ -27,9 +29,9 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(headers=HEADERS, timeout=30, follow_redirects=True)
 
 
-async def _get_json(url: str, **params):
+async def _get_json(url: str, headers: dict | None = None, **params):
     async with _client() as c:
-        r = await c.get(url, params=params or None)
+        r = await c.get(url, params=params or None, headers=headers)
     if r.status_code in (403, 429):
         raise RateLimited(f"{httpx.URL(url).host} đang giới hạn truy cập, thử lại sau")
     r.raise_for_status()
@@ -64,12 +66,22 @@ class _Cache:
 
 
 # ---------- Google News ----------
+_google_lock = asyncio.Lock()
+_google_last = 0.0
+
+
 async def search_news(query: str, lang: str = "vi", limit: int = 8) -> list[dict]:
+    global _google_last
     hl, gl, ceid = {"vi": ("vi", "VN", "VN:vi"), "en": ("en-US", "US", "US:en")}[lang]
     url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl={hl}&gl={gl}&ceid={ceid}"
-    async with _client() as c:
-        r = await c.get(url)
-        r.raise_for_status()
+    async with _google_lock:  # Google News answers 429 to bursts: space requests out a little
+        await asyncio.sleep(max(0.0, 1.2 - (time.time() - _google_last)))
+        _google_last = time.time()
+        async with _client() as c:
+            r = await c.get(url)
+    if r.status_code in (429, 503):
+        raise RateLimited("Google News đang giới hạn tần suất, thử lại sau vài phút")
+    r.raise_for_status()
     items = []
     for e in feedparser.parse(r.content).entries[:20]:
         title = clean_text(e.get("title", ""))
@@ -80,6 +92,23 @@ async def search_news(query: str, lang: str = "vi", limit: int = 8) -> list[dict
         items.append({"title": title, "url": e.get("link", ""), "source": source,
                       "published": calendar.timegm(ts) if ts else int(time.time())})
     # Google ranks by relevance; keep its top 20 but show the newest first.
+    return sorted(items, key=lambda n: n["published"], reverse=True)[:limit]
+
+
+# ---------- Bing News (different index from Google, often faster for niche/tech news) ----------
+async def search_bing(query: str, limit: int = 8) -> list[dict]:
+    async with _client() as c:
+        r = await c.get("https://www.bing.com/news/search", params={"q": query, "format": "rss", "mkt": "en-US"})
+        r.raise_for_status()
+    items = []
+    for e in feedparser.parse(r.content).entries:
+        link = e.get("link", "")
+        # Bing wraps links in a click tracker; the real article is in the `url` parameter.
+        url = parse_qs(urlparse(link).query).get("url", [link])[0]
+        ts = e.get("published_parsed")
+        items.append({"title": clean_text(e.get("title", "")), "url": url,
+                      "source": e.get("news_source") or urlparse(url).netloc or "Bing",
+                      "published": calendar.timegm(ts) if ts else int(time.time())})
     return sorted(items, key=lambda n: n["published"], reverse=True)[:limit]
 
 
@@ -107,13 +136,108 @@ def _victim(v: dict) -> dict:
 async def search_ransomware(query: str) -> list[dict]:
     """Victims whose name/domain contains `query` as a whole word (the API does substring matching)."""
     word = word_re(query)
-    victims = [_victim(v) for v in await _rl_get(f"searchvictims/{quote(query)}")]
+    try:
+        raw = await _rl_get(f"searchvictims/{quote(query)}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:  # the API answers 404 when nothing matches
+            return []
+        raise
+    victims = [_victim(v) for v in raw]
     victims = [v for v in victims if word.search(f"{v['victim']} {v['domain']}")]
     return sorted(victims, key=lambda v: v["discovered"], reverse=True)
 
 
 async def recent_ransomware() -> list[dict]:
     return [_victim(v) for v in await _rl_get("recentvictims")]
+
+
+# Ransomware group profiles (ransomware.live). Onion addresses are deliberately never returned.
+_rl_groups = _Cache(24 * 3600)
+
+
+async def ransomware_groups() -> dict[str, dict]:
+    async def load():
+        return {g["name"].lower(): g for g in await _rl_get("groups") if g.get("name")}
+    return await _rl_groups.get(load)
+
+
+def _listish(v):
+    """ransomware.live returns some nested fields as Python-repr strings."""
+    if isinstance(v, str) and v[:1] in "[{":
+        import ast
+        try:
+            return ast.literal_eval(v)
+        except (ValueError, SyntaxError):
+            return []
+    return v or []
+
+
+_rlook_groups = _Cache(24 * 3600)
+
+
+async def group_names() -> set[str]:
+    """Known ransomware group names (ransomware.live, falling back to RansomLook when rate-limited)."""
+    try:
+        return set(await ransomware_groups())
+    except Exception:
+        return {g.lower() for g in await _rlook_groups.get(lambda: _get_json(f"{RANSOMLOOK}/groups"))}
+
+
+async def ransomware_group(name: str) -> dict | None:
+    g = (await ransomware_groups()).get(name.lower())
+    if not g:
+        return None
+    tools = {}
+    for block in _listish(g.get("tools")):
+        if isinstance(block, dict):
+            for cat, names in block.items():
+                tools.setdefault(cat, []).extend(names if isinstance(names, list) else [names])
+    tactics = [t.get("tactic_name") for t in _listish(g.get("ttps")) if isinstance(t, dict) and t.get("tactic_name")]
+    sites = [x for x in _listish(g.get("locations")) if isinstance(x, dict)]
+    try:
+        victims = [_victim(v) for v in await _rl_get(f"groupvictims/{quote(g['name'])}")]
+    except Exception:
+        victims = []
+    victims.sort(key=lambda v: -v["discovered"])
+    countries = collections.Counter(v["country"] for v in victims if v["country"])
+    desc = clean_text(re.sub(r"<[^>]+>", " ", g.get("description") or ""))
+    return {"name": g["name"], "description": desc,
+            "first_seen": g.get("added_date") or "", "tools": tools, "tactics": tactics,
+            "sites_total": len(sites), "sites_up": sum(1 for x in sites if x.get("available")),
+            "victims_total": len(victims), "victims": victims[:5], "countries": countries.most_common(5),
+            "vn_victims": [v for v in victims if v["country"] == "VN"][:5],
+            "url": g.get("url") or f"https://www.ransomware.live/group/{quote(g['name'])}"}
+
+
+# ---------- RansomLook (dark-web tracker): index of leaked databases, metadata only ----------
+RANSOMLOOK = "https://www.ransomlook.io/api"
+_rlook_leaks = _Cache(24 * 3600)
+
+
+async def search_leak_index(names: list[str], limit: int = 5) -> list[dict]:
+    """Leaked databases whose name matches the organisation (size, record count, column names: no data)."""
+    index = await _rlook_leaks.get(lambda: _get_json(f"{RANSOMLOOK}/leaks/leaks"))
+    pats = [re.compile(rf"(^|[.\-_ ]){re.escape(n.lower())}([.\-_ ]|$)") for n in names if n]
+    hits = [x for x in index if any(p.search(x["name"].lower()) for p in pats)][:limit]
+    details = await asyncio.gather(*(_get_json(f"{RANSOMLOOK}/leaks/leaks/{x['id']}") for x in hits),
+                                   return_exceptions=True)
+    out = []
+    for x, d in zip(hits, details):
+        d = d if isinstance(d, dict) else {}
+        out.append({"name": x["name"], "size": d.get("size") or "?", "records": d.get("records") or "?",
+                    "columns": d.get("columns") or [], "indexed": d.get("indexed") or "",
+                    "url": f"https://www.ransomlook.io/leak/{x['id']}"})
+    return out
+
+
+# ---------- Dark-web reporting sites (news about leak sites, forums, markets) via Google News ----------
+DARKWEB_SITES = ["darkwebinformer.com", "dailydarkweb.net", "databreaches.net", "hackread.com", "cybernews.com",
+                 "ransomware.live", "dexpose.io", "hackmanac.com"]
+
+
+async def search_darkweb_news(query: str, limit: int = 10) -> list[dict]:
+    sites = " OR ".join(f"site:{s}" for s in DARKWEB_SITES)
+    return await search_news(f"{query} ({sites})", "en", limit)
 
 
 # ---------- HaveIBeenPwned (verified data breaches) ----------
@@ -264,10 +388,41 @@ async def search_gdelt(query: str, limit: int = 8) -> list[dict]:
     return out
 
 
-# ---------- GitHub Security Advisories ----------
+# ---------- GitHub (advisories, repositories) ----------
+def gh_headers() -> dict:
+    """Optional GITHUB_TOKEN (no scopes needed) raises the API limit from 60 to 5000 requests/hour."""
+    token = (os.environ.get("GITHUB_TOKEN") or "").strip()
+    h = {"Accept": "application/vnd.github+json"}
+    return h | {"Authorization": f"Bearer {token}"} if token else h
+
+
+def _ghsa(a: dict) -> dict:
+    vulns = [v for v in a.get("vulnerabilities") or [] if v.get("package")]
+    return {"id": a["ghsa_id"], "cve": a.get("cve_id"), "summary": a.get("summary", ""),
+            "severity": a.get("severity") or "?", "published": _ts(a.get("published_at")),
+            "packages": [v["package"]["name"] for v in vulns], "url": a["html_url"],
+            "fixes": [{"package": f"{v['package'].get('ecosystem', '')}/{v['package']['name']}",
+                       "vulnerable": v.get("vulnerable_version_range") or "?",
+                       "patched": v.get("first_patched_version") or "chưa có"} for v in vulns],
+            "references": a.get("references") or []}
+
+
+async def ghsa_by_cve(cve: str) -> list[dict]:
+    return [_ghsa(a) for a in await _get_json("https://api.github.com/advisories", headers=gh_headers(),
+                                              cve_id=cve, per_page=10)]
+
+
+async def search_repos(query: str, limit: int = 6, sort: str = "stars") -> list[dict]:
+    data = await _get_json("https://api.github.com/search/repositories", headers=gh_headers(),
+                           q=query, sort=sort, order="desc", per_page=30)
+    return [{"name": r["full_name"], "description": (r.get("description") or "")[:160],
+             "stars": r.get("stargazers_count", 0), "updated": _ts(r.get("pushed_at")), "url": r["html_url"]}
+            for r in data.get("items", [])][:limit]
+
+
 async def search_ghsa(keyword: str, limit: int = 5) -> list[dict]:
-    data = await _get_json("https://api.github.com/advisories", keyword=keyword, per_page=50,
-                           sort="published", direction="desc")
+    data = await _get_json("https://api.github.com/advisories", headers=gh_headers(), keyword=keyword,
+                           per_page=50, sort="published", direction="desc")
     word = word_re(keyword)
     out = []
     for a in data:
@@ -275,9 +430,7 @@ async def search_ghsa(keyword: str, limit: int = 5) -> list[dict]:
         # GitHub's keyword search is loose; keep advisories that really mention the keyword.
         if not word.search(f"{a.get('summary', '')} {a.get('description', '')} {' '.join(pkgs)}"):
             continue
-        out.append({"id": a["ghsa_id"], "cve": a.get("cve_id"), "summary": a.get("summary", ""),
-                    "severity": a.get("severity") or "?", "published": _ts(a.get("published_at")),
-                    "packages": pkgs, "url": a["html_url"]})
+        out.append(_ghsa(a))
     return out[:limit]
 
 

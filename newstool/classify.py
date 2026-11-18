@@ -1,6 +1,8 @@
 import re
 
 CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
+# English/other-language items about Vietnam also get the "vn" tag.
+VN_RE = re.compile(r"(?<!\w)(vietnam(ese)?|việt nam|viet nam)(?!\w)|\w\.vn(?!\w)", re.IGNORECASE)
 
 
 def _pattern(keyword: str) -> str:
@@ -26,7 +28,7 @@ class Classifier:
     def tags(self, title: str, summary: str, category: str, lang: str) -> list[str]:
         text = f"{title}\n{summary}"
         tags = [category]
-        if lang == "vi":
+        if lang == "vi" or VN_RE.search(text):
             tags.append("vn")
         tags += [tag for tag, p in self.rules.items() if p.search(text)]
         if self.watch and self.watch.search(text):

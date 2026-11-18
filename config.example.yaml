@@ -7,6 +7,7 @@ max_per_push: 40          # số tin tối đa mỗi lần đẩy (phần thừa
 state_path: state.db      # chỉ lưu dấu vết tin đã gửi (hash URL/tiêu đề, tự xóa sau 7 ngày)
 
 # category: tag gốc của nguồn (security / tech). lang: vi -> thêm tag "vn".
+# alert: local -> chỉ báo ngay khi tin liên quan Việt Nam / watchlist, còn lại vào bản tóm tắt.
 feeds:
   # --- An ninh bảo mật ---
   - { name: The Hacker News,  url: https://feeds.feedburner.com/TheHackersNews, category: security }
@@ -17,6 +18,29 @@ feeds:
   - { name: Dark Reading,     url: https://www.darkreading.com/rss.xml,         category: security }
   - { name: DataBreaches.net, url: https://databreaches.net/feed/,              category: security }
   - { name: Schneier,         url: https://www.schneier.com/feed/atom/,         category: security }
+  - { name: HackRead,         url: https://www.hackread.com/feed/,              category: security, alert: local }
+  # --- Theo dõi dark web (tin tổng hợp về leak site, forum, chợ đen; chỉ metadata, không link .onion) ---
+  - { name: Dark Web Informer, url: https://darkwebinformer.com/rss/,            category: security, every_minutes: 10, alert: local }
+  - { name: Daily Dark Web,   url: https://dailydarkweb.net/feed/,              category: security, every_minutes: 10, alert: local }
+  # --- CERT / cơ quan an ninh mạng ---
+  - { name: CERT-FR,          url: https://www.cert.ssi.gouv.fr/feed/,          category: security, every_minutes: 15, alert: local }
+  - { name: JPCERT/CC,        url: https://www.jpcert.or.jp/english/rss/jpcert-en.rdf, category: security, every_minutes: 30, alert: local }
+  - { name: NCSC UK,          url: https://www.ncsc.gov.uk/api/1/services/v1/all-rss-feed.xml, category: security, every_minutes: 30, alert: local }
+  - { name: CERT-EU,          url: https://cert.europa.eu/publications/security-advisories-rss, category: security, every_minutes: 30, alert: local }
+  # --- Threat research (phân tích APT, malware, lỗ hổng) ---
+  - { name: Cisco Talos,      url: https://blog.talosintelligence.com/rss/,     category: security, every_minutes: 30, alert: local }
+  - { name: Unit 42,          url: https://unit42.paloaltonetworks.com/feed/,   category: security, every_minutes: 30, alert: local }
+  - { name: Securelist,       url: https://securelist.com/feed/,                category: security, every_minutes: 30, alert: local }
+  - { name: ESET WeLiveSecurity, url: https://www.welivesecurity.com/en/rss/feed/, category: security, every_minutes: 30, alert: local }
+  - { name: Check Point Research, url: https://research.checkpoint.com/feed/,   category: security, every_minutes: 30, alert: local }
+  - { name: Microsoft Security, url: https://www.microsoft.com/en-us/security/blog/feed/, category: security, every_minutes: 30, alert: local }
+  - { name: Sophos X-Ops,     url: https://news.sophos.com/en-us/category/threat-research/feed/, category: security, every_minutes: 30, alert: local }
+  - { name: Rapid7,           url: https://www.rapid7.com/blog/rss/,            category: security, every_minutes: 30, alert: local }
+  - { name: watchTowr Labs,   url: https://labs.watchtowr.com/rss/,             category: security, every_minutes: 30, alert: local }
+  - { name: Horizon3.ai,      url: https://horizon3.ai/feed/,                   category: security, every_minutes: 30, alert: local }
+  # --- Trung Quốc (cert.360.cn không dùng được: chứng chỉ SSL hết hạn từ 07/2024) ---
+  - { name: Anquanke 安全客,  url: https://api.anquanke.com/data/v1/rss,        category: security, lang: zh, every_minutes: 15, alert: local }
+  - { name: Seebug Paper,     url: https://paper.seebug.org/rss/,              category: security, lang: zh, every_minutes: 30, alert: local }
   # --- Cộng đồng ---
   # Reddit chặn request song song -> gộp nhiều subreddit vào 1 URL, poll thưa hơn
   - { name: Reddit netsec+cybersecurity, url: "https://www.reddit.com/r/netsec+cybersecurity/.rss", category: security, every_minutes: 10 }

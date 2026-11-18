@@ -15,6 +15,7 @@ class Feed:
     category: str
     lang: str = "en"
     every_minutes: int = 0  # 0 = every poll; >0 = poll this feed less often
+    alert: str = "all"      # "all" = important tags alert now; "local" = only if about Vietnam or the watchlist
 
 
 @dataclass

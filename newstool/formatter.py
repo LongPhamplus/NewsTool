@@ -65,7 +65,15 @@ def format_victim(v: dict) -> str:
 def pack(blocks: list[str]) -> list[str]:
     """Join blocks into as few Telegram messages as possible."""
     messages, buf = [], ""
-    for block in blocks:
+    split = []
+    for block in blocks:  # a single oversized block is split on line breaks (each line closes its own tags)
+        while len(block) > MAX_LEN:
+            cut = block.rfind("\n", 0, MAX_LEN)
+            cut = cut if cut > 0 else MAX_LEN
+            split.append(block[:cut])
+            block = block[cut:].lstrip("\n")
+        split.append(block)
+    for block in split:
         if buf and len(buf) + len(block) + 2 > MAX_LEN:
             messages.append(buf)
             buf = ""
