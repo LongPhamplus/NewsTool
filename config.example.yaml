@@ -41,6 +41,28 @@ feeds:
   # --- Trung Quốc (cert.360.cn không dùng được: chứng chỉ SSL hết hạn từ 07/2024) ---
   - { name: Anquanke 安全客,  url: https://api.anquanke.com/data/v1/rss,        category: security, lang: zh, every_minutes: 15, alert: local }
   - { name: Seebug Paper,     url: https://paper.seebug.org/rss/,              category: security, lang: zh, every_minutes: 30, alert: local }
+  # --- Kỹ năng & kỹ thuật: pentest, red team, blue team, SOC (category skill: /topics, /sub skill) ---
+  - { name: PortSwigger Research, url: https://portswigger.net/research/rss,     category: skill, every_minutes: 30, alert: local }
+  - { name: PortSwigger Blog,   url: https://portswigger.net/blog/rss,           category: skill, every_minutes: 60, alert: local }
+  - { name: Project Zero,       url: "https://googleprojectzero.blogspot.com/feeds/posts/default", category: skill, every_minutes: 60, alert: local }
+  - { name: Trail of Bits,      url: https://blog.trailofbits.com/feed/,         category: skill, every_minutes: 60, alert: local }
+  - { name: SpecterOps,         url: https://specterops.io/feed/,                category: skill, every_minutes: 60, alert: local }
+  - { name: Assetnote,          url: https://blog.assetnote.io/feed.xml,         category: skill, every_minutes: 60, alert: local }
+  - { name: Cobalt,             url: https://www.cobalt.io/blog/rss.xml,        category: skill, every_minutes: 120, alert: local }
+  - { name: Detectify,          url: https://blog.detectify.com/feed/,          category: skill, every_minutes: 120, alert: local }
+  - { name: Intigriti,          url: https://www.intigriti.com/blog/feed,       category: skill, every_minutes: 120, alert: local }
+  - { name: Hacking Articles,   url: https://www.hackingarticles.in/feed/,      category: skill, every_minutes: 120, alert: local }
+  - { name: Didier Stevens,     url: https://blog.didierstevens.com/feed/,      category: skill, every_minutes: 120, alert: local }
+  - { name: Red Canary,         url: https://redcanary.com/feed/,               category: skill, every_minutes: 60, alert: local }
+  - { name: SANS ISC,           url: https://isc.sans.edu/rssfeed.xml,          category: skill, every_minutes: 30, alert: local }
+  - { name: Elastic Security Labs, url: https://www.elastic.co/security-labs/rss/feed.xml, category: skill, every_minutes: 30, alert: local }
+  - { name: The DFIR Report,    url: https://thedfirreport.com/feed/,           category: skill, every_minutes: 60, alert: local }
+  - { name: Huntress Blog,      url: https://www.huntress.com/blog/rss.xml,     category: skill, every_minutes: 120, alert: local }
+  - { name: Velociraptor,       url: https://docs.velociraptor.app/blog/index.xml, category: skill, every_minutes: 120, alert: local }
+  - { name: Exploit-DB,         url: https://www.exploit-db.com/rss.xml,        category: skill, every_minutes: 30, alert: local }
+  - { name: Metasploit releases, url: https://github.com/rapid7/metasploit-framework/releases.atom, category: skill, every_minutes: 120, alert: local }
+  - { name: Nuclei releases,    url: https://github.com/projectdiscovery/nuclei/releases.atom, category: skill, every_minutes: 120, alert: local }
+  - { name: Sigma releases,     url: https://github.com/SigmaHQ/sigma/releases.atom, category: skill, every_minutes: 120, alert: local }
   # --- Công nghệ ---
   - { name: Hacker News 300+, url: "https://hnrss.org/frontpage?points=300",    category: tech }
   - { name: Ars Technica,     url: https://feeds.arstechnica.com/arstechnica/index, category: tech }
@@ -119,6 +141,40 @@ rules:
 # Cách thông báo:
 #   - tin có tag trong "important" -> gửi ngay, có âm báo
 #   - tin còn lại -> gom lại, gửi im lặng mỗi digest_minutes phút (0 = gửi ngay mọi tin)
+  # Kỹ năng theo vai trò (gắn thêm cho mọi nguồn khớp, để /sub redteam hoặc /sub blueteam)
+  redteam:
+    - pentest*
+    - penetration test*
+    - red team*
+    - redteam
+    - privilege escalation
+    - lateral movement
+    - kerberoast*
+    - active directory
+    - bug bounty
+    - xss
+    - sqli
+    - ssrf
+    - idor
+    - ctf
+    - writeup*
+  blueteam:
+    - blue team*
+    - blueteam
+    - soc analyst
+    - security operations
+    - threat hunt*
+    - detection engineering
+    - siem
+    - edr
+    - sigma rule*
+    - yara
+    - incident response
+    - forensic*
+    - dfir
+    - att&ck
+    - mitre att&ck
+
 notify:
   important: [watch, ransomware, kev, breach, incident, vuln, malware]
   digest_minutes: 60

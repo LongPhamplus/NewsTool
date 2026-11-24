@@ -1,18 +1,26 @@
-"""Deep research on one vulnerability: a CVE id or a nickname (React2Shell, Log4Shell, Spring4Shell...).
+"""Deep research on a vulnerability (CVE id or nickname: React2Shell, Log4Shell...), a threat actor (APT32),
+a malware family (Lumma) or a ransomware group (Akira).
 
 Every source is a free public API or public file; nothing is downloaded or executed, only linked.
 """
 import asyncio
 import collections
 import html
+import re
 from urllib.parse import quote_plus, urlparse
 
 import httpx
 
+from . import deep
+from .pipeline import RECENT
 from .classify import CVE_RE, cves as find_cves
-from .formatter import SEV, format_exploit, format_hn, format_item, format_news_line
-from .intel import (NVD_API, RateLimited, _client, _get_json, exploits_by_cve, ghsa_by_cve, kev_catalog,
-                    search_bing, search_exploits, search_ghsa, search_hn, search_news, search_repos)
+from .formatter import (SEV, ago, _date, format_exploit, format_gtfo, format_hn, format_item, format_lolbas,
+                        format_news_line, format_technique)
+from .intel import (NVD_API, RateLimited, _client, _get_json, exploits_by_cve, ghsa_by_cve, group_names, kev_catalog,
+                    ransomware_group, search_bing, search_darkweb_news, search_exploits, search_ghsa, search_hn,
+                    search_news, search_repos)
+from .fetcher import clean_text
+from .query import SEC_RE, Query, fold, rank
 
 MITRE_API = "https://cveawg.mitre.org/api/cve/"
 EPSS_API = "https://api.first.org/data/v1/epss"
@@ -158,8 +166,11 @@ async def _edb(cve: str) -> list[dict]:
 
 
 # ---------- orchestration ----------
+LOOKUP_TIMEOUT = 35  # seconds: one slow source must not hold the whole answer
+
+
 async def _run(lookups: dict) -> dict:
-    lookups = {k: v for k, v in lookups.items() if v is not None}
+    lookups = {k: asyncio.wait_for(v, LOOKUP_TIMEOUT) for k, v in lookups.items() if v is not None}
     return dict(zip(lookups, await asyncio.gather(*lookups.values(), return_exceptions=True)))
 
 
@@ -196,9 +207,32 @@ def _merge(*lists, limit: int = 8) -> list[dict]:
     return out[:limit]
 
 
+async def profile_kind(name: str) -> tuple[str, dict | None] | None:
+    """Is `name` a ransomware group, a threat actor or a malware family? (in that order of preference)"""
+    groups, actor, malware = await asyncio.gather(*(asyncio.wait_for(c, 20) for c in (
+        group_names(), deep.find_actor(name), deep.find_malware(name))), return_exceptions=True)
+    if isinstance(groups, set) and name.lower() in groups:
+        return "group", None
+    if isinstance(actor, dict):
+        return "actor", actor
+    if isinstance(malware, dict):
+        return "malware", malware
+    return None
+
+
 async def research(query: str, watcher=None) -> list[str]:
-    """Return HTML blocks describing everything public about a vulnerability."""
+    """Return HTML blocks describing everything public about a vulnerability, actor, malware or group."""
     query = query.strip()
+    if not is_cve(query) and (prof := await profile_kind(query)):
+        return await research_profile(query, *prof, watcher=watcher)
+    if not is_cve(query) and is_concept(query):
+        return await research_concept(query)
+    if not is_cve(query):
+        skill = await _run({"attack": deep.attack_lookup(query),
+                            "lolbas": deep.lolbas(query) if " " not in query else None,
+                            "gtfo": deep.gtfobins(query) if " " not in query else None})
+        if any(_ok(skill, k) for k in ("attack", "lolbas", "gtfo")):
+            return await research_skill(query, skill)
     nickname = None if is_cve(query) else query
     disc: dict = {}
     if nickname:
@@ -223,6 +257,8 @@ async def research(query: str, watcher=None) -> list[str]:
         "nvd": nvd_cve(cve), "mitre": mitre_cve(cve), "epss": epss(cve), "kev": _kev(cve), "edb": _edb(cve),
         "ghsa_cve": ghsa_by_cve(cve), "trickest": trickest(cve), "nuclei": nuclei(cve), "circl": circl_sightings(cve),
         "poc": search_repos(cve, 6), "en_cve": search_news(cve, "en", 8), "bing_cve": search_bing(cve, 8),
+        "shodan": deep.shodan_cve(cve), "nomisec": deep.nomisec_pocs(cve), "msf": deep.metasploit(cve),
+        "sploitus": deep.sploitus(cve, 25), "otx": deep.otx_cve(cve),
         "hn_cve": search_hn(cve, 5, days=3650),
         "tg_cve": watcher.search(cve, per_channel=5, days=3650) if watcher else None,
         "vi_cve": None if nickname else search_news(cve, "vi", 6),
@@ -241,9 +277,198 @@ async def research(query: str, watcher=None) -> list[str]:
     return blocks
 
 
+BLOG_SITES = ["portswigger.net", "hackingarticles.in", "medium.com", "infosecwriteups.com", "assetnote.io",
+              "intigriti.com", "detectify.com", "specterops.io", "trailofbits.com", "hacktricks.wiki"]
+
+CONCEPT_WORDS = {"bypass", "injection", "inject", "smuggling", "hijack", "hijacking", "poisoning", "spoofing",
+                 "traversal", "escalation", "deserialization", "takeover", "enumeration", "persistence", "pivoting",
+                 "pivot", "exfiltration", "evasion", "evade", "obfuscation", "technique", "method", "desync",
+                 "forgery", "xss", "sqli", "ssrf", "csrf", "idor", "xxe", "ssti", "crlf", "race", "kỹ", "thuật",
+                 "tấn", "công", "khai", "thác", "vượt", "qua"}
+GENERIC_TERMS = {"the", "and", "how", "what", "with", "for", "của", "là", "gì", "cách", "không", "các", "những"}
+
+
+def is_concept(query: str) -> bool:
+    """A technique described in words ("301 status code bypass", "jwt none algorithm attack")."""
+    words = [fold(w).lower().strip(".,?!") for w in query.split()]
+    return len(words) >= 2 and any(w in CONCEPT_WORDS for w in words)
+
+
+TERM_STOP = GENERIC_TERMS | {"kỹ", "thuật", "technique", "method", "tấn", "công", "khai", "thác", "vượt", "qua",
+                             "attack"}
+
+
+def _core(query: str) -> list[str]:
+    """Words that must appear: "bypass" stays (it is the point), filler words go."""
+    words = re.findall(r"[\w+.-]+", fold(query).lower())
+    return [w for w in words if len(w) >= 2 and w not in TERM_STOP] or words
+
+
+def _relevant(text: str, terms: list[str]) -> bool:
+    """Text must mention most of the core terms (so "403 bypass" does not return "Chanel bypass" articles)."""
+    if not terms:
+        return False
+    t = fold(text).lower()
+    hits = sum(1 for w in terms if re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", t))
+    return hits >= max(1, -(-len(terms) * 7 // 10))
+
+
+async def research_concept(query: str) -> list[str]:
+    """How a technique works: explanations from knowledge bases, write-ups from security blogs, Q&A."""
+    terms = _core(query)
+    words = [t for t in terms if not t.isdigit()] or terms  # article titles rarely repeat a number like 301
+    sites = " OR ".join(f"site:{s}" for s in BLOG_SITES)
+    res = await _run({
+        "kb": deep.knowledge_snippets(query, 6),
+        "blogs": search_news(f"{' '.join(words)} ({sites})", "en", 30),
+        "en": search_news(query, "en", 20),
+        "bing": search_bing(query, 15),
+        "se": deep.stackexchange(query, 6),
+    })
+    blocks = [f"🔬 <b>Research kỹ thuật: {html.escape(query)}</b>"]
+    kb = res.get("kb")
+    if isinstance(kb, Exception):
+        blocks.append(f"📖 Kho kiến thức: <i>{html.escape(_err(kb))}</i>")
+    elif kb is None:
+        blocks.append("<i>Muốn có đoạn giải thích từ HackTricks, PayloadsAllTheThings, OWASP: đặt "
+                      "<code>GITHUB_TOKEN</code> trong .env (xem README).</i>")
+    elif kb:
+        blocks.append("📖 <b>Giải thích kỹ thuật</b> <i>(HackTricks, PayloadsAllTheThings, OWASP)</i>\n" + "\n".join(
+            f'• <a href="{html.escape(k["url"])}">{html.escape(k["repo"])}</a> · '
+            f'<code>{html.escape(k["path"])}</code>\n<i>{html.escape(k["snippet"])}</i>' for k in kb))
+    pool = _ok(res, "blogs", []) + _ok(res, "en", []) + _ok(res, "bing", []) + list(RECENT.values())
+    seen, articles = set(), []
+    for n in sorted(pool, key=lambda n: -n.get("published", 0)):
+        text = f"{n.get('title', '')} {n.get('summary', '')}"
+        if n["url"] in seen or not _relevant(text, words):
+            continue
+        seen.add(n["url"])
+        articles.append(n)
+    if articles:
+        lines = []
+        for n in articles[:6]:
+            summary = clean_text(n.get("summary") or "")
+            summary = "" if summary.lower().startswith(n["title"].lower()[:30]) else summary[:200]
+            lines.append(f'• <a href="{html.escape(n["url"])}">{html.escape(n["title"][:120])}</a> — '
+                         f'<i>{html.escape(n.get("source") or "")}</i>, {ago(n["published"])}'
+                         + (f"\n  <i>{html.escape(summary)}</i>" if summary else ""))
+        blocks.append("📰 <b>Bài viết &amp; nghiên cứu</b>\n" + "\n".join(lines))
+    se = [q for q in _ok(res, "se", []) if _relevant(f"{q['title']} {q['snippet']}", words)]
+    if se:
+        blocks.append("💬 <b>Hỏi đáp (Information Security Stack Exchange)</b>\n" + "\n".join(
+            f'• <a href="{html.escape(q["url"])}">{html.escape(q["title"][:110])}</a> ({q["score"]}▲)'
+            + (f"\n  <i>{html.escape(q['snippet'][:160])}</i>" if q["snippet"] else "") for q in se[:4]))
+    if not articles and not kb and not isinstance(kb, Exception):
+        blocks.append("<i>Chưa tìm thấy bài viết khớp đủ từ khóa. Thử cách diễn đạt khác hoặc tên kỹ thuật tiếng Anh.</i>")
+    blocks.append(f'🔗 <b>Tra cứu thêm</b>: <a href="https://www.google.com/search?q={quote_plus(query + " site:book.hacktricks.wiki OR site:portswigger.net")}">Google (HackTricks, PortSwigger)</a>'
+                  f' · <a href="https://github.com/search?q={quote_plus(chr(34) + query + chr(34))}&type=code">GitHub code</a>')
+    failed = [k for k in ("blogs", "en", "bing", "se") if isinstance(res.get(k), Exception)]
+    if failed:
+        blocks.append("<i>Nguồn lỗi/giới hạn: " + html.escape(", ".join(f"{k} ({_err(res[k])})" for k in failed)) + "</i>")
+    return blocks
+
+
+async def research_skill(query: str, res: dict) -> list[str]:
+    """A technique (T1558.003, kerberoasting), a Windows or Linux binary abused by attackers (certutil, find)."""
+    techs = _ok(res, "attack", [])
+    name = techs[0]["name"].split(": ")[-1] if techs else query
+    blocks = [f"🔬 <b>Research: {html.escape(query)}</b> — 🧰 Kỹ thuật"]
+    for t in techs:
+        blocks.append(format_technique(t))
+    if l := _ok(res, "lolbas"):
+        blocks.append(format_lolbas(l))
+    if g := _ok(res, "gtfo"):
+        blocks.append(format_gtfo(g))
+    blocks.append("<i>Cách học: chạy mã test Atomic trong phòng lab có snapshot, rồi kiểm tra xem luật Sigma/EDR có báo không.</i>")
+    news = await _run({"en": search_news(name, "en", 20), "bing": search_bing(name, 15),
+                       "hn": search_hn(name, 6, days=3650)})
+    pool = _ok(news, "en", []) + _ok(news, "bing", [])
+    pool += [{"title": h["title"], "url": h["hn_url"], "published": h["published"], "summary": h["url"],
+              "source": f"Hacker News · {h['points']}▲"} for h in _ok(news, "hn", [])]
+    pool += list(RECENT.values())
+    ranked = rank(Query(raw=query, entity=name, kind="org"), pool, 10)
+    if ranked:
+        blocks.append("📰 <b>Bài viết kỹ thuật &amp; tin liên quan</b>\n" + "\n".join(format_news_line(n) for n in ranked))
+    return blocks
+
+
+KIND_LABEL = {"group": "🏴‍☠️ Nhóm ransomware", "actor": "🕵️ Nhóm tấn công (APT)", "malware": "🦠 Malware"}
+
+
+async def research_profile(query: str, kind: str, entry: dict | None, watcher=None) -> list[str]:
+    from .search import format_group, format_ranked  # local import: search.py does not import research
+    names = [query] if entry is None else [entry["name"], *[s for s in entry["synonyms"] if len(s) >= 3]]
+    names = list(dict.fromkeys(names))
+    q = Query(raw=query, entity=names[0], kind="org", aliases=names[1:6],
+              topics=["ransomware"] if kind == "group" else [])
+    search_q = " OR ".join(f'"{n}"' for n in names[:3])
+    is_ransom = kind == "group" or "ransom" in (entry or {}).get("description", "").lower()
+    res = await _run({
+        "group": ransomware_group(query) if kind == "group" else None,
+        "pay": deep.ransom_payments(names[0]) if is_ransom else None,
+        "en": search_news(search_q, "en", 25), "bing": search_bing(search_q, 20), "vi": search_news(search_q, "vi", 10),
+        "dark": search_darkweb_news(names[0], 10), "hn": search_hn(names[0], 6, days=3650),
+        "tg": watcher.search(names[0], per_channel=5, days=3650) if watcher else None,
+    })
+    blocks = [f"🔬 <b>Research: {html.escape(query)}</b> — {KIND_LABEL[kind]}"]
+    if isinstance(res.get("group"), dict):
+        blocks.append(format_group(res["group"]))
+    if entry:
+        lines = [f"{KIND_LABEL[kind]} <b>{html.escape(entry['name'])}</b>"]
+        if len(names) > 1:
+            lines.append("Tên khác: " + html.escape(", ".join(names[1:12])))
+        facts = [f"quốc gia: <b>{html.escape(entry['country'])}</b>" if entry["country"] else "",
+                 f"mục đích: {html.escape(str(entry['incident']))}" if entry["incident"] else ""]
+        if any(facts):
+            lines.append(" · ".join(f for f in facts if f))
+        if entry["victims"]:
+            vn = " 🇻🇳 <b>có Việt Nam</b>" if any("viet" in v.lower() for v in entry["victims"]) else ""
+            lines.append("Nạn nhân: " + html.escape(", ".join(entry["victims"][:10])) + vn)
+        if entry["targets"]:
+            lines.append("Lĩnh vực: " + html.escape(", ".join(entry["targets"][:8])))
+        if entry["description"]:
+            lines.append(f"<i>{html.escape(entry['description'][:900])}</i>")
+        blocks.append("\n".join(lines))
+    if p := _ok(res, "pay"):
+        blocks.append(f"💰 <b>Tiền chuộc ghi nhận on-chain</b> (ransomwhe.re): <b>${p['usd']:,.0f}</b> qua "
+                      f"{p['payments']} giao dịch, {p['addresses']} ví" + (f", gần nhất {_date(p['last'])}" if p["last"] else "")
+                      + "\n<i>Chỉ là phần được cộng đồng báo cáo, con số thật lớn hơn nhiều.</i>")
+    pool = _ok(res, "en", []) + _ok(res, "bing", []) + _ok(res, "vi", [])
+    pool += [{"title": h["title"], "url": h["hn_url"], "published": h["published"], "summary": h["url"],
+              "source": f"Hacker News · {h['points']}▲"} for h in _ok(res, "hn", [])]
+    pool += [{"title": i["title"], "url": i["url"], "published": i["published"], "summary": i["summary"],
+              "source": i["source"]} for i in _ok(res, "tg", [])]
+    security = [n for n in pool if SEC_RE.search(f"{n['title']} {n.get('summary', '')}")]
+    news = rank(q, security, 12)
+    if news:
+        blocks.append("📰 <b>Tin & phân tích mới nhất</b>\n" + "\n".join(format_ranked(n) for n in news))
+    dark = rank(q, _ok(res, "dark", []), 6)
+    if dark:
+        blocks.append("🌑 <b>Tin dark web</b>\n" + "\n".join(format_ranked(n) for n in dark))
+    if entry and entry["refs"]:
+        blocks.append(f"📚 <b>Báo cáo kỹ thuật</b> ({len(entry['refs'])} tài liệu, mới thêm gần nhất)\n"
+                      + _links(list(reversed(entry["refs"])), 10))
+    links = {}
+    if entry and entry.get("mitre"):
+        links["MITRE ATT&amp;CK"] = entry["mitre"]
+    if kind == "actor":
+        links["Malpedia"] = entry["malpedia"]
+    if kind == "group":
+        links["ransomware.live"] = f"https://www.ransomware.live/group/{quote_plus(query.lower())}"
+        links["RansomLook"] = f"https://www.ransomlook.io/group/{quote_plus(query.lower())}"
+    links["OTX"] = f"https://otx.alienvault.com/browse/global/pulses?q={quote_plus(names[0])}"
+    blocks.append("🔗 <b>Tra cứu thêm</b>: " + " · ".join(f'<a href="{html.escape(u)}">{k}</a>' for k, u in links.items()))
+    failed = [k for k, v in res.items() if isinstance(v, Exception)]
+    if failed:
+        blocks.append("<i>Nguồn lỗi/giới hạn: " + html.escape(", ".join(f"{k} ({_err(res[k])})" for k in failed)) + "</i>")
+    return blocks
+
+
 def _err(e: Exception) -> str:
     if isinstance(e, RateLimited):
         return str(e)
+    if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+        return "quá thời gian chờ"
     if isinstance(e, httpx.HTTPStatusError):
         return f"HTTP {e.response.status_code}"
     return type(e).__name__
@@ -265,7 +490,9 @@ def _overview(cve: str, nickname: str | None, nvd: dict, mitre: dict, res: dict)
                                    f"CNA: {html.escape(mitre['cna'])}" if mitre.get("cna") else "") if x)]
     if desc:
         head.append(f"<i>{html.escape(desc[:700])}</i>")
-    blocks = ["\n".join(head)]
+    blocks = ["\n".join(head), _verdict(score, mitre, res)]
+    if tl := _timeline(published, res):
+        blocks.append(tl)
 
     risk = []
     kev = _ok(res, "kev")
@@ -276,9 +503,15 @@ def _overview(cve: str, nickname: str | None, nvd: dict, mitre: dict, res: dict)
         risk.append(f"CISA KEV: <i>{_err(res['kev'])}</i>")
     else:
         risk.append("CISA KEV: chưa có trong danh sách")
-    if e := _ok(res, "epss"):
+    e = _ok(res, "epss")
+    sh = _ok(res, "shodan") or {}
+    if not e and sh.get("epss") is not None:  # FIRST down: Shodan CVEDB carries the same EPSS
+        e = {"epss": sh["epss"], "percentile": sh.get("ranking_epss") or 0}
+    if e:
         risk.append(f"🎯 EPSS: <b>{e['epss'] * 100:.2f}%</b> khả năng bị khai thác trong 30 ngày "
                     f"(nằm trong top {max((1 - e['percentile']) * 100, 0.01):.2f}% CVE nguy hiểm nhất)")
+    if sh.get("ransomware") and not (kev and kev.get("knownRansomwareCampaignUse") == "Known"):
+        risk.append("💀 <b>Được dùng trong chiến dịch ransomware</b> (Shodan CVEDB)")
     if ssvc := mitre.get("ssvc"):
         risk.append("🏛 CISA SSVC: " + " · ".join(f"{k}: <b>{html.escape(str(v))}</b>" for k, v in ssvc.items()))
     if c := _ok(res, "circl"):
@@ -300,34 +533,134 @@ def _overview(cve: str, nickname: str | None, nvd: dict, mitre: dict, res: dict)
     if patches or ghsa_links:
         blocks.append("🩹 <b>Advisory &amp; bản vá</b>\n" + _links(ghsa_links + patches, 8))
 
-    expl = []
-    for e in _ok(res, "edb", [])[:5]:
-        expl.append(format_exploit(e))
-    if n := _ok(res, "nuclei"):
-        expl.append(f'• <a href="{html.escape(n)}">Nuclei template</a> — phát hiện/kiểm tra hệ thống bị ảnh hưởng')
+    blocks.append(_exploits(cve, res))
+    blocks.extend(_threat_context(res))
     t = _ok(res, "trickest", {"references": [], "github": []})
-    poc_repos = _ok(res, "poc", [])
-    known = {r["url"].lower() for r in poc_repos}
-    for r in poc_repos:
-        expl.append(f'• ⭐{r["stars"]} <a href="{html.escape(r["url"])}">{html.escape(r["name"])}</a>'
-                    + (f" — {html.escape(r['description'][:90])}" if r["description"] else ""))
-    extra = [u for u in t["github"] if u.lower() not in known]
-    if extra:
-        year = cve.split("-")[1]
-        expl.append(f'• <a href="https://github.com/trickest/cve/blob/main/{year}/{cve}.md">trickest/cve</a> '
-                    f"tổng hợp thêm {len(extra)} repo PoC khác")
-    if expl:
-        blocks.append("💣 <b>Exploit / PoC công khai</b>\n" + "\n".join(expl)
-                      + "\n<i>⚠️ PoC trên GitHub chưa được kiểm chứng, nhiều repo giả chứa mã độc: chỉ đọc, "
-                        "chạy thử trong máy ảo/lab.</i>")
-    else:
-        blocks.append("💣 <b>Exploit / PoC công khai</b>: <i>chưa thấy</i>")
 
     writeups = [r["url"] for r in refs if r["tags"] & WRITEUP_TAGS and r["url"] not in patches]
     writeups += [u for u in t["references"] if "github.com" not in u]
     if writeups:
         blocks.append("🔬 <b>Phân tích kỹ thuật &amp; tham khảo</b>\n" + _links(writeups, 10))
     return blocks
+
+
+def _verdict(score, mitre: dict, res: dict) -> str:
+    """One-line patch priority, derived from exploitation evidence rather than CVSS alone."""
+    kev, sh, e = _ok(res, "kev"), _ok(res, "shodan") or {}, _ok(res, "epss")
+    epss_v = (e or {}).get("epss", sh.get("epss") or 0) or 0
+    msf, edb, pocs = _ok(res, "msf", []), _ok(res, "edb", []), _ok(res, "nomisec", []) or _ok(res, "poc", [])
+    circl = (_ok(res, "circl") or {}).get("counts", {})
+    active = bool(kev) or str(mitre.get("ssvc", {}).get("Exploitation", "")).lower() == "active"
+    why = []
+    if kev:
+        why.append("đang bị khai thác thực tế (CISA KEV)")
+    elif active:
+        why.append("CISA SSVC: Exploitation active")
+    if circl.get("exploited"):
+        why.append(f"honeypot/CIRCL ghi nhận {circl['exploited']:,} lần khai thác")
+    if sh.get("ransomware") or (kev and kev.get("knownRansomwareCampaignUse") == "Known"):
+        why.append("dùng trong ransomware")
+    if msf:
+        why.append("đã có module Metasploit")
+    if pocs or edb:
+        why.append(f"{len(pocs) + len(edb)} PoC/exploit công khai")
+    if epss_v >= 0.01:
+        why.append(f"EPSS {epss_v * 100:.1f}%")
+    if active or (msf and epss_v >= 0.1):
+        level = "🔥 <b>VÁ NGAY</b> (ưu tiên cao nhất)"
+    elif (score or 0) >= 7 and (pocs or edb or msf or epss_v >= 0.05):
+        level = "⚠️ <b>Vá sớm</b> (trong vài ngày)"
+    elif (score or 0) >= 9:
+        level = "🟠 <b>Vá theo kế hoạch gần</b> (nghiêm trọng nhưng chưa thấy khai thác)"
+    else:
+        level = "📋 <b>Theo dõi</b>, vá theo chu kỳ"
+    action = (kev or {}).get("requiredAction") or sh.get("propose_action") or ""
+    return (f"🧭 <b>Đánh giá</b>: {level}" + (f"\nVì: {', '.join(why)}" if why else "")
+            + (f"\n<i>Khuyến nghị (CISA): {html.escape(action[:300])}</i>" if action and kev else ""))
+
+
+def _timeline(published: str | None, res: dict) -> str | None:
+    """Disclosure -> first PoC -> KEV -> first news, with day offsets: how fast it went from paper to weapon."""
+    start = deep.iso_ts(published)
+    if not start:
+        return None
+    events = [(start, "công bố CVE")]
+    pocs = _ok(res, "nomisec", [])
+    if p := deep.first_date(pocs, "created", not_before=start - 7 * 86400):  # older repos were renamed/reused
+        events.append((p, "PoC đầu tiên trên GitHub"))
+    edb_dates = [deep.iso_ts(x["date"]) for x in _ok(res, "edb", []) if x.get("date")]
+    if edb_dates := [d for d in edb_dates if d]:
+        events.append((min(edb_dates), "lên Exploit-DB"))
+    msf = _ok(res, "msf", [])
+    if kev := _ok(res, "kev"):
+        events.append((deep.iso_ts(kev["dateAdded"]) or start, "vào CISA KEV (xác nhận bị khai thác)"))
+    news = _ok(res, "en_cve", []) + _ok(res, "bing_cve", [])
+    if n := deep.first_date(news, "published", not_before=start - 30 * 86400):
+        events.append((n, "tin tức đầu tiên"))
+    if len(events) < 2:
+        return None
+    events.sort()
+    def offset(ts: int) -> str:
+        days = (ts - start) // 86400
+        return "" if ts <= start + 3600 else " <i>(trong 24 giờ)</i>" if days < 1 else f" <i>(+{days} ngày)</i>"
+    lines = [f"• {_date(ts)} {label}{offset(ts)}" for ts, label in events]
+    if msf:
+        lines.append(f"• Metasploit: {len(msf)} module ({html.escape(msf[0]['rank'])})")
+    return "⏱ <b>Dòng thời gian</b>\n" + "\n".join(lines)
+
+
+def _exploits(cve: str, res: dict) -> str:
+    expl = []
+    for m in _ok(res, "msf", [])[:3]:
+        expl.append(f'• 🎯 <b>Metasploit</b>: <a href="{html.escape(m["url"])}">{html.escape(m["name"])}</a>'
+                    f" · rank {html.escape(m['rank'])}" + (" · có lệnh check" if m["check"] else ""))
+    for e in _ok(res, "edb", [])[:4]:
+        expl.append(format_exploit(e))
+    if n := _ok(res, "nuclei"):
+        expl.append(f'• <a href="{html.escape(n)}">Nuclei template</a> — phát hiện/kiểm tra hệ thống bị ảnh hưởng')
+    pocs = _ok(res, "nomisec", [])
+    source = "nomi-sec/PoC-in-GitHub"
+    if not pocs:
+        pocs, source = _ok(res, "poc", []), "GitHub search"
+    if pocs:
+        expl.append(f"<b>{len(pocs)} repo PoC trên GitHub</b> ({source}), nhiều sao nhất:")
+        for r in pocs[:6]:
+            expl.append(f'  ⭐{r["stars"]} <a href="{html.escape(r["url"])}">{html.escape(r["name"])}</a>'
+                        + (f" — {html.escape(r['description'][:80])}" if r["description"] else ""))
+    sp = _ok(res, "sploitus")
+    if sp:
+        others = [x for x in sp["items"] if "github.com" not in x["url"]][:4]
+        if others:
+            expl.append(f'<b>Sploitus</b> ({sp["total"]} kết quả), ngoài GitHub:')
+            expl.extend(f'  • <a href="{html.escape(x["url"])}">{html.escape(x["title"][:90])}</a> · '
+                        f'{html.escape(x["type"])} · {html.escape(x["published"])}' for x in others)
+    t = _ok(res, "trickest", {"references": [], "github": []})
+    known = {r["url"].lower() for r in pocs}
+    extra = [u for u in t["github"] if u.lower() not in known]
+    if extra:
+        year = cve.split("-")[1]
+        expl.append(f'• <a href="https://github.com/trickest/cve/blob/main/{year}/{cve}.md">trickest/cve</a> '
+                    f"có thêm {len(extra)} repo")
+    if not expl:
+        return "💣 <b>Exploit / PoC công khai</b>: <i>chưa thấy</i>"
+    return ("💣 <b>Exploit / PoC công khai</b>\n" + "\n".join(expl)
+            + "\n<i>⚠️ PoC chưa được kiểm chứng, nhiều repo giả chứa mã độc: chỉ đọc, chạy trong máy ảo/lab.</i>")
+
+
+def _threat_context(res: dict) -> list[str]:
+    o = _ok(res, "otx")
+    if not o or not o["count"]:
+        return []
+    lines = [f"🕸 <b>Threat intel</b> (AlienVault OTX: {o['count']} báo cáo nhắc tới)"]
+    if o["adversaries"]:
+        lines.append("Nhóm/chiến dịch: " + html.escape(", ".join(o["adversaries"][:8])))
+    if o["malware"]:
+        lines.append("Malware đi kèm: " + html.escape(", ".join(o["malware"][:8])))
+    if o["industries"]:
+        lines.append("Ngành bị nhắm: " + html.escape(", ".join(o["industries"][:6])))
+    lines += [f'• <a href="{html.escape(p["url"])}">{html.escape(p["name"][:110])}</a> — {_date(p["created"])}'
+              for p in o["pulses"][:4]]
+    return ["\n".join(lines)]
 
 
 def _links(urls: list[str], limit: int) -> str:

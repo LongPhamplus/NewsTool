@@ -127,7 +127,8 @@ def _victim(v: dict) -> dict:
         "group": v.get("group") or v.get("group_name") or "?",
         "country": v.get("country") or "",
         "activity": v.get("activity") or "",
-        "description": (v.get("description") or "").removeprefix("[AI generated]").strip(),
+        "description": "" if (v.get("description") or "").strip().lower() in ("not found", "n/a") else
+        (v.get("description") or "").removeprefix("[AI generated]").strip(),
         "discovered": _ts(v.get("discovered")),
         "url": v.get("url") or "",
     }

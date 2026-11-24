@@ -23,7 +23,7 @@ Kiểm tra các nguồn mà không cần Telegram: `uv run newstool check-feeds`
 | Lệnh | Tác dụng |
 |---|---|
 | `/search <câu hỏi>` | Tìm kiếm thông minh (xem bên dưới) |
-| `/search --research <CVE hoặc tên lỗ hổng>` hay `/research …` | Nghiên cứu sâu một lỗ hổng (xem bên dưới) |
+| `/research <CVE, tên lỗ hổng, nhóm APT, malware, nhóm ransomware>` | Nghiên cứu sâu (xem bên dưới). Cũng gõ được `/search --research …` |
 | `/topics`, `/sub <tag>`, `/unsub <tag>` | Bật/tắt topic được đẩy tự động |
 | `/fetch` | Lấy tin ngay |
 | `/digest` | Gửi ngay bản tóm tắt tin thường đang chờ |
@@ -64,31 +64,74 @@ Gõ câu hỏi tự nhiên, tiếng Việt hoặc tiếng Anh. Mất khoảng 10
 | 💧 | HaveIBeenPwned | Vụ rò rỉ dữ liệu đã xác minh |
 | 💾 | RansomLook | CSDL bị lộ trên dark web: tên, số bản ghi, dung lượng, tên cột (**chỉ metadata**) |
 | 🎣 | crt.sh | Domain mới (30 ngày) chứa tên thương hiệu, có thể là giả mạo |
+| 🪝 | urlscan.io | Trang web dùng tên thương hiệu vừa bị quét (60 ngày), có link ảnh chụp; domain được "làm hỏng" (`evil[.]com`) để không lỡ bấm |
+| 🚨 | OpenPhish | URL lừa đảo đang hoạt động có chứa tên thương hiệu |
+| 🕸 | AlienVault OTX | Báo cáo threat intel nhắc tới domain của tổ chức |
 | 📰 | Google News VI/EN, Bing News, GDELT, Hacker News, Telegram channel, **toàn bộ tin RSS 7 ngày gần nhất** | Tin liên quan, đã xếp hạng |
 | 🌑 | Dark Web Informer, Daily Dark Web, DataBreaches, HackRead, Cybernews, DeXpose… | Tin về leak site, forum, chợ đen |
-| 🐞📦💣 | NVD + CISA KEV, GitHub Advisories, Exploit-DB | CVE, advisory, exploit (khi hỏi về lỗ hổng hoặc sản phẩm) |
+| 🎯 | CISA KEV + EPSS | Mọi lỗ hổng của hãng/sản phẩm **đã bị khai thác thực tế**, số dùng trong ransomware |
+| 🛠 | Metasploit | Module khai thác có sẵn cho sản phẩm (đã "vũ khí hóa") |
+| 🐞📦💣 | NVD, GitHub Advisories, Exploit-DB | CVE 120 ngày, advisory, exploit (khi hỏi về lỗ hổng hoặc sản phẩm) |
+| 💰 | ransomwhe.re | Tiền chuộc ghi nhận on-chain của nhóm ransomware |
 
 Bot không truy cập trang .onion và không tải dữ liệu bị lộ: chỉ dùng các trang theo dõi dark web công khai.
 Tin RSS gần đây chỉ nằm trong bộ nhớ của bot (không ghi ra đĩa) và mất khi bot khởi động lại.
 cert.360.cn không dùng được: chứng chỉ SSL của trang đã hết hạn từ 07/2024. Nguồn Trung Quốc hiện có: Anquanke, Seebug.
 
-### `/research` – nghiên cứu sâu một lỗ hổng
-`/research react2shell`, `/research log4shell`, `/research spring4shell`, `/research CVE-2025-55182`,
-hoặc `/search --research …` (chấp nhận cả `--reseach`, `-r`). Mất khoảng 15–40 giây.
+### `/research` – nghiên cứu sâu
+`/research react2shell`, `/research CVE-2025-55182`, `/research apt32`, `/research lumma`, `/research akira`,
+hoặc `/search --research …` (chấp nhận cả `--reseach`, `-r`). Thường mất 10–40 giây.
+`/search` cũng tự chuyển sang đây khi gặp mã CVE, tên lỗ hổng, nhóm APT hoặc malware.
 
-Với **tên gọi** (React2Shell, Log4Shell…), bot tìm trên tin tức, HN, GitHub, Exploit-DB và Telegram, đếm mã CVE
-được nhắc nhiều nhất để xác định lỗ hổng. Các CVE liên quan khác được liệt kê để tra tiếp.
+**Lỗ hổng** (CVE hoặc tên gọi như React2Shell, Log4Shell: bot đếm mã CVE được nhắc nhiều nhất để xác định):
 
 | Mục | Nguồn |
 |---|---|
-| 🧬 Tổng quan: CVSS, vector, CWE, mô tả, CNA | NVD + bản ghi CVE chính thức (MITRE, có cả khi NVD chưa phân tích) |
-| 📊 Mức độ nguy hiểm | CISA KEV (đang bị khai thác, dùng trong ransomware), EPSS (xác suất bị khai thác 30 ngày), CISA SSVC, CIRCL (số lần ghi nhận bị khai thác / PoC / được nhắc) |
+| 🧭 **Đánh giá ưu tiên vá**: VÁ NGAY / Vá sớm / Theo dõi, kèm lý do | Tổng hợp từ KEV, SSVC, CIRCL, Metasploit, số PoC, EPSS |
+| ⏱ **Dòng thời gian**: công bố → PoC đầu tiên → vào KEV → tin đầu tiên (+N ngày) | nomi-sec, Exploit-DB, CISA KEV, tin tức |
+| 🧬 Tổng quan: CVSS, vector, CWE, mô tả, CNA | NVD + bản ghi CVE chính thức (MITRE) |
+| 📊 Mức độ nguy hiểm | CISA KEV, EPSS, CISA SSVC, CIRCL (số lần bị khai thác/PoC/nhắc tới), Shodan CVEDB (dùng trong ransomware) |
 | 📦 Phạm vi ảnh hưởng & bản vá | Phiên bản bị ảnh hưởng (CNA), gói và phiên bản vá (GitHub Advisory) |
-| 🩹 Advisory | Link vendor advisory, patch (NVD) |
-| 💣 Exploit / PoC | Exploit-DB, Nuclei template, repo GitHub nhiều sao, trickest/cve |
-| 🔬 Phân tích kỹ thuật | Bài viết được NVD/trickest gắn nhãn exploit, technical description… |
-| 📰💬📢🗣 | Google + Bing News, tin VI, Hacker News, Telegram channel, mạng xã hội (Bluesky, Mastodon, Telegram qua CIRCL) |
-| 🔗 | Link nhanh: NVD, CVE.org, CIRCL, AttackerKB, Vulners, GitHub code search |
+| 💣 Exploit / PoC | **Metasploit**, Exploit-DB, Nuclei, **toàn bộ PoC GitHub** (nomi-sec/PoC-in-GitHub, xếp theo sao), **Sploitus** (Packet Storm, Kitploit…), trickest/cve |
+| 🕸 Threat intel | **AlienVault OTX**: nhóm tấn công, malware, ngành bị nhắm, báo cáo mới nhất |
+| 📰💬📢🗣 | Google + Bing News, tin VI, Hacker News, Telegram channel, mạng xã hội (qua CIRCL) |
+
+**Nhóm APT** (APT32/OceanLotus, Lazarus…), **malware** (Lumma, Emotet…), **nhóm ransomware** (Akira…):
+hồ sơ từ MISP Galaxy và Malpedia (tên khác, quốc gia, nạn nhân, lĩnh vực, mô tả), hồ sơ ransomware.live, tiền chuộc
+on-chain (ransomwhe.re), tin và phân tích đã xếp hạng, tin dark web, danh sách báo cáo kỹ thuật, link MITRE ATT&CK.
+
+### Kỹ năng & kỹ thuật (pentest, red team, blue team, SOC)
+`/research kerberoasting`, `/research T1059.001`, `/research lateral movement`, `/research certutil`, `/research find`.
+`/search` cũng hiện mục này khi câu hỏi có tên kỹ thuật.
+
+| Mục | Nguồn | Dùng để |
+|---|---|---|
+| 🎯 Kỹ thuật (MITRE ATT&CK ID, tên, chiến thuật) | MITRE ATT&CK qua Atomic Red Team | Red team: số bài test Atomic có sẵn; blue team: link luật Sigma |
+| 🦾 Công cụ Windows bị lạm dụng | LOLBAS | Chức năng bị lạm dụng (tải file, thực thi, mã hóa…) và MITRE ID. Lệnh cụ thể chỉ xem trên trang gốc |
+| 🐧 Công cụ Linux bị lạm dụng | GTFOBins | Các chức năng (shell, đọc/ghi file…) và ngữ cảnh (sudo, suid, unprivileged). Không hiện mã khai thác |
+| 📰 Blog & nghiên cứu | PortSwigger, Project Zero, Trail of Bits, SpecterOps, Assetnote, Cobalt, Detectify, Intigriti, Hacking Articles, Didier Stevens | Pentest, web, Active Directory, bug bounty |
+| 🛡 Blue team & SOC | Red Canary, SANS ISC, Elastic Security Labs, The DFIR Report, Huntress, Velociraptor | Phát hiện, săn mối đe dọa, điều tra sự cố (DFIR) |
+| 🧪 Công cụ & exploit mới | Metasploit, Nuclei, Sigma (release), Exploit-DB | Biết khi nào có bản phát hành hoặc module mới |
+
+### Giải thích một kỹ thuật (mô tả, không chỉ liệt kê)
+Gõ kỹ thuật bằng lời, có từ như *bypass, injection, smuggling, hijack, traversal, escalation, XSS, SQLi…*:
+`/research 301 status code bypass`, `/research 403 forbidden bypass`, `/research http request smuggling`.
+
+| Mục | Nguồn | Nội dung |
+|---|---|---|
+| 📖 Giải thích kỹ thuật | HackTricks, PayloadsAllTheThings, OWASP cheat sheet & WSTG (tìm qua GitHub code search) | Đoạn văn trích từ kho kiến thức, kèm link tới file gốc |
+| 📰 Bài viết & nghiên cứu | Google News trong các blog kỹ thuật (PortSwigger, Medium, Hacking Articles, Assetnote, Intigriti, Detectify, SpecterOps, Trail of Bits…) và feed skill đã lưu | Tiêu đề, nguồn, ngày và tóm tắt |
+| 💬 Hỏi đáp | Information Security Stack Exchange | Câu hỏi được chấp nhận, đã lọc theo từ khóa |
+
+Mục 📖 cần **`GITHUB_TOKEN`** trong `.env` (tạo fine-grained token không cần quyền). GitHub giới hạn code search
+**10 lần/phút**, nên kết quả được lưu đệm 1 giờ. Nếu không tìm thấy đoạn khớp đủ từ khóa, bot báo "chưa tìm thấy"
+thay vì đưa bài không liên quan.
+
+Feed kỹ năng có category `skill`, đẩy vào bản tóm tắt (không báo chuông). Tag `redteam` và `blueteam` được
+gắn theo từ khóa để lọc: `/sub redteam`, `/unsub blueteam`. Bài viết cũ được lấy từ bộ nhớ RSS 7 ngày gần nhất.
+
+Các bộ dữ liệu lớn (Metasploit, MISP, KEV, Exploit-DB, ransomwhe.re) được nạp sẵn khi bot khởi động và làm mới
+mỗi 12 giờ, chỉ giữ chỉ mục gọn trong RAM. Mỗi nguồn có tối đa 35 giây, nguồn chậm bị bỏ qua.
 
 Repo PoC chỉ được **liệt kê link**, bot không tải hay chạy gì. Nhiều repo "PoC" giả chứa mã độc: chỉ thử trong máy ảo/lab.
 Nên đặt `GITHUB_TOKEN` (fine-grained, không cần quyền) trong `.env` để tránh bị GitHub giới hạn khi tra nhiều.
@@ -149,7 +192,7 @@ Bộ lọc mỗi channel: bỏ trống = mọi tin, `watch` = chỉ khớp watch
 
 ## Chạy nền (systemd user service)
 Đã cài tại `~/.config/systemd/user/newstool.service` (tự khởi động cùng máy, tự chạy lại khi lỗi,
-giới hạn CPU 25%, RAM tối đa 400 MB). Linger đã bật nên bot chạy cả khi chưa đăng nhập.
+giới hạn CPU 25%, RAM tối đa 480 MB). Linger đã bật nên bot chạy cả khi chưa đăng nhập.
 
 ```bash
 systemctl --user status newstool        # trạng thái

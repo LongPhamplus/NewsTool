@@ -11,7 +11,7 @@ from .config import Config
 from .formatter import EMOJI, ago, format_messages, pack
 from .intel import RateLimited
 from .query import parse
-from .research import research
+from .research import profile_kind, research
 from .search import smart_search
 from .pipeline import STATUS, remember, fetch_feeds, fetch_intel, muted, select, subscribed
 from .state import State
@@ -20,8 +20,8 @@ log = logging.getLogger(__name__)
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 HELP = """<b>NewsTool</b> – tin công nghệ &amp; bảo mật
-/search &lt;từ khóa&gt; – tra cứu tổng hợp: leak site ransomware, infostealer, rò rỉ dữ liệu, domain giả mạo, CVE, tin tức, Telegram
-/search --research &lt;CVE hoặc tên lỗ hổng&gt; (hoặc /research) – nghiên cứu sâu 1 lỗ hổng: CVSS, EPSS, KEV, phiên bản bị ảnh hưởng, bản vá, PoC/exploit, bài phân tích, tin tức, mạng xã hội. VD: <code>/research react2shell</code>, <code>/research CVE-2021-44228</code>
+/search &lt;câu hỏi&gt; – tìm kiếm thông minh về tổ chức/sản phẩm/chủ đề: leak site, infostealer, CSDL bị lộ, trang lừa đảo giả danh, CVE nguy hiểm nhất, tin tức, dark web. VD: <code>/search vụ FPT bị tấn công ransomware</code>
+/research &lt;CVE | tên lỗ hổng | nhóm APT | malware | nhóm ransomware | kỹ thuật&gt; – nghiên cứu sâu: đánh giá ưu tiên vá, dòng thời gian, PoC/Metasploit, threat intel, giải thích kỹ thuật. VD: <code>/research react2shell</code>, <code>/research apt32</code>, <code>/research 301 status code bypass</code>, <code>/research kerberoasting</code>
 /topics – xem các topic đang bật
 /sub &lt;tag&gt; · /unsub &lt;tag&gt; – bật/tắt topic
 /fetch – lấy tin ngay
@@ -146,7 +146,7 @@ async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE, query
             "Dùng: /research &lt;CVE hoặc tên lỗ hổng&gt;\nVD: <code>/research CVE-2025-55182</code>, "
             "<code>/research react2shell</code>, <code>/research log4shell</code>, <code>/research spring4shell</code>")
         return
-    await update.message.reply_text(f"🔬 Đang nghiên cứu '{query}' trên ~15 nguồn, có thể mất 20–60 giây...")
+    await update.message.reply_text(f"🔬 Đang nghiên cứu '{query}' trên ~25 nguồn, thường mất 10–40 giây...")
     blocks = await research(query, context.bot_data.get("tg"))
     await _send(context.bot, update.effective_chat.id, pack(blocks))
 
@@ -169,6 +169,11 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if q.kind in ("cve", "vuln"):  # a vulnerability is best served by the research view
         await cmd_research(update, context, q.entity)
         return
+    if q.kind == "org" and not q.topics and len(q.entity.split()) <= 3:
+        prof = await profile_kind(q.entity)  # APT group / malware family -> profile view
+        if prof and prof[0] in ("actor", "malware"):
+            await cmd_research(update, context, q.entity)
+            return
     await update.message.reply_html(f"🔎 Đang tìm… {q.describe() or html.escape(text)} (20–40 giây)")
     _, blocks = await smart_search(text, cfg, context.bot_data.get("tg"))
     await _send(context.bot, update.effective_chat.id, pack(blocks))
@@ -237,6 +242,18 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_html("\n".join(lines))
 
 
+async def warmup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pre-load the big reference datasets so the first /search or /research of the day is fast."""
+    from . import deep
+    from .intel import exploitdb, group_names, kev_catalog
+    jobs = {"ransomware groups": group_names(), "KEV": kev_catalog(), "Exploit-DB": exploitdb(),
+            "Metasploit": deep._msf_index(), "ransomwhe.re": deep.ransom_payments("_"),
+            **{f"MISP {n}": deep._cluster(n) for n in ("threat-actor", "malpedia", "ransomware")}}
+    results = await asyncio.gather(*jobs.values(), return_exceptions=True)
+    failed = [f"{k} ({type(r).__name__})" for k, r in zip(jobs, results) if isinstance(r, Exception)]
+    log.info("Đã nạp sẵn dữ liệu tra cứu%s", f", lỗi: {', '.join(failed)}" if failed else "")
+
+
 async def _start_telegram(app: Application) -> None:
     cfg = app.bot_data["cfg"]
     if not cfg.chat_id or not cfg.telegram_ready:
@@ -291,6 +308,7 @@ def build(cfg: Config) -> Application:
     late_ok = {"misfire_grace_time": 120, "coalesce": True}
     app.job_queue.run_repeating(feeds_job, interval=cfg.poll_minutes * 60, first=5, job_kwargs=late_ok)
     app.job_queue.run_repeating(intel_job, interval=cfg.intel_poll_minutes * 60, first=20, job_kwargs=late_ok)
+    app.job_queue.run_repeating(warmup_job, interval=12 * 3600, first=60, job_kwargs=late_ok)
     if cfg.digest_minutes > 0:
         app.job_queue.run_repeating(digest_job, interval=cfg.digest_minutes * 60, first=cfg.digest_minutes * 60,
                                     job_kwargs=late_ok)

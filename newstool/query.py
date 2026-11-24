@@ -61,6 +61,7 @@ class Query:
     kind: str = "org"                      # org | domain | cve | vuln | group | country | topic
     days: int | None = None
     cves: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)  # other names (OceanLotus = APT32)
 
     @property
     def folded(self) -> str:
@@ -86,7 +87,7 @@ class Query:
         """Spellings to look for in results (accented, folded; both languages for Vietnam)."""
         if self.kind == "country":
             return ["Việt Nam", "Viet Nam", "Vietnam", "Vietnamese"]
-        return list(dict.fromkeys(x for x in (self.entity, self.folded) if x))
+        return list(dict.fromkeys(x for x in (self.entity, self.folded, *self.aliases) if x and len(x) >= 3))
 
     def engine_query(self, lang: str) -> str:
         """Query string for news engines: entity + topic expansion (OR)."""

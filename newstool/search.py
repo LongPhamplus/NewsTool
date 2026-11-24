@@ -7,12 +7,14 @@ import time
 
 from .classify import cves as find_cves
 from .config import Config
-from .formatter import (_date, ago, format_breach, format_cve, format_exploit, format_ghsa, format_infostealer,
+from .formatter import (_date, ago, format_breach, format_cve, format_exploit, format_ghsa, format_gtfo,
+                        format_infostealer, format_lolbas, format_technique,
                         format_lookalike, format_victim)
 from .intel import (RateLimited, group_names, ransomware_group, recent_ransomware, search_bing,
                     search_breaches, search_cves, search_darkweb_news, search_exploits, search_gdelt, search_ghsa,
                     search_hn, search_infostealer, search_leak_index, search_lookalikes, search_news,
                     search_ransomware)
+from . import deep
 from .pipeline import RECENT
 from .query import SECURITY_EN, Query, parse, rank
 
@@ -22,12 +24,17 @@ DARKWEB_FEEDS = {"Dark Web Informer", "Daily Dark Web", "DataBreaches.net", "Hac
 def _err(e: Exception) -> str:
     if isinstance(e, RateLimited):
         return str(e)
+    if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+        return "quá thời gian chờ"
     status = getattr(getattr(e, "response", None), "status_code", None)
     return f"HTTP {status}" if status else type(e).__name__
 
 
+LOOKUP_TIMEOUT = 35  # seconds: one slow source must not hold the whole answer
+
+
 async def _run(lookups: dict) -> dict:
-    lookups = {k: v for k, v in lookups.items() if v is not None}
+    lookups = {k: asyncio.wait_for(v, LOOKUP_TIMEOUT) for k, v in lookups.items() if v is not None}
     return dict(zip(lookups, await asyncio.gather(*lookups.values(), return_exceptions=True)))
 
 
@@ -54,6 +61,42 @@ def format_ranked(n: dict) -> str:
 
 def _when(ts: int) -> str:
     return ago(ts) if time.time() - ts < 30 * 86400 else _date(ts)
+
+
+def defang(s: str) -> str:
+    """Make a malicious URL/domain non-clickable: hxxps://evil[.]com."""
+    return s.replace("http", "hxxp", 1).replace(".", "[.]")
+
+
+def format_urlscan(x: dict) -> str:
+    flag = " 🔴 <b>urlscan đánh giá độc hại</b>" if x["verdict"] else ""
+    return (f'• <code>{html.escape(defang(x["domain"]))}</code> — quét {_date(x["at"])} · '
+            f'<a href="{html.escape(x["result"])}">xem ảnh chụp</a>{flag}')
+
+
+def format_phish_url(u: str) -> str:
+    return f"• <code>{html.escape(defang(u)[:150])}</code>"
+
+
+def format_otx_domain(o: dict) -> str:
+    lines = [f"🕸 <b>{html.escape(o['domain'])}</b>: {o['count']} báo cáo"]
+    if o["adversaries"] or o["malware"]:
+        lines.append(html.escape(", ".join(o["adversaries"][:4] + o["malware"][:4])))
+    lines += [f'• <a href="{html.escape(p["url"])}">{html.escape(p["name"][:100])}</a> — {_date(p["created"])}'
+              for p in o["pulses"][:3]]
+    return "\n".join(lines)
+
+
+def format_kev_item(c: dict) -> str:
+    epss = f" · EPSS {c['epss'] * 100:.1f}%" if c.get("epss") is not None else ""
+    return (f'• <a href="{html.escape(c["url"])}"><b>{c["id"]}</b></a> {html.escape(c["product"])} — '
+            f"{html.escape(c['name'][:80])} · KEV {html.escape(c['added'])}{epss}"
+            + (" 💀 ransomware" if c["ransomware"] else ""))
+
+
+def format_msf(m: dict) -> str:
+    return (f'• <a href="{html.escape(m["url"])}">{html.escape(m["name"])}</a> · {html.escape(m["rank"])}'
+            f" · {html.escape(m['disclosed'])}")
 
 
 def format_leak(x: dict) -> str:
@@ -124,6 +167,17 @@ async def smart_search(text: str, cfg: Config, watcher=None) -> tuple[Query, lis
         "dark": search_darkweb_news(ent or news_en, 15),
         "hn": search_hn(ent, 8) if ent else None,
         "tg": watcher.search(ent, per_channel=5) if watcher and ent else None,
+        # Lesser-known sources
+        "pay": deep.ransom_payments(q.entity) if q.kind == "group" else None,
+        "phish": deep.urlscan_brand(q.brand, q.domains) if want_brand and len(q.brand) >= 4 else None,
+        "openphish": deep.openphish_brand(q.brand) if want_brand and len(q.brand) >= 4 else None,
+        **({f"otx:{d}": deep.otx_domain(d) for d in q.domains[:3]} if q.kind in ("org", "domain") else {}),
+        "kev_vendor": deep.kev_by_vendor(q.entity) if want_vuln and q.entity else None,
+        "msf": deep.metasploit_search(q.entity) if want_vuln and q.entity else None,
+        # Techniques, red/blue team
+        "attack": deep.attack_lookup(q.entity) if q.kind in ("org", "vuln") and len(q.entity) >= 4 else None,
+        "lolbas": deep.lolbas(q.entity) if q.kind == "org" and " " not in q.entity else None,
+        "gtfo": deep.gtfobins(q.entity) if q.kind == "org" and " " not in q.entity else None,
     })
     # Leak sites / HIBP reveal the organisation's real domains (e.g. fptsoftware.com): check those too.
     found = {x["domain"].lower() for key in ("victims", "breaches") for x in _ok(res, key) if x.get("domain")}
@@ -162,10 +216,22 @@ async def smart_search(text: str, cfg: Config, watcher=None) -> tuple[Query, lis
                       f'<a href="https://www.ransomware.live/group/{html.escape(q.entity.lower())}">xem trên ransomware.live</a>')
 
     def vuln_sections():
+        kv = res.get("kev_vendor")
+        if isinstance(kv, dict) and kv["total"]:
+            ransom = f", {kv['ransomware']} được dùng trong ransomware" if kv["ransomware"] else ""
+            blocks.append(f"🎯 <b>{kv['total']} lỗ hổng của '{html.escape(q.entity)}' đã bị khai thác thực tế</b> "
+                          f"<i>(CISA KEV{ransom}; mới nhất trước)</i>\n" + "\n".join(format_kev_item(x) for x in kv["items"]))
+        section("🛠 <b>Module Metasploit</b> <i>(đã vũ khí hóa)</i>", res.get("msf"), format_msf, 5, joined=True)
         section("🐞 <b>CVE 120 ngày qua (NVD)</b>", res.get("cves"), format_cve, 5)
         section("📦 <b>GitHub Advisories</b>", res.get("ghsa"), format_ghsa, 4)
         section("💣 <b>Exploit công khai (Exploit-DB)</b>", res.get("exploits"), format_exploit, 5, joined=True)
 
+    for key, title, fmt in (("attack", "🎯 <b>Kỹ thuật tấn công &amp; phòng thủ (MITRE ATT&amp;CK + Atomic Red Team)</b>",
+                             format_technique),
+                            ("lolbas", "🦾 <b>LOLBAS (công cụ Windows bị lạm dụng)</b>", format_lolbas),
+                            ("gtfo", "🐧 <b>GTFOBins (công cụ Linux bị lạm dụng)</b>", format_gtfo)):
+        v = res.get(key)
+        section(title, [v] if isinstance(v, dict) else v, fmt, 3, joined=True)
     if "vuln" in q.topics:
         vuln_sections()
     if q.kind in ("org", "domain"):
@@ -184,6 +250,16 @@ async def smart_search(text: str, cfg: Config, watcher=None) -> tuple[Query, lis
                 f"không thấy '{e}'")
         section(f"🎣 <b>Domain mới chứa '{e}' (30 ngày, có thể giả mạo)</b>", look, format_lookalike, 12,
                 "không có", joined=True)
+        section(f"🪝 <b>Trang web dùng tên '{e}' vừa bị quét</b> <i>(urlscan.io, 60 ngày; kiểm tra trước khi tin)</i>",
+                res.get("phish"), format_urlscan, 8, joined=True)
+        section("🚨 <b>URL lừa đảo đang hoạt động</b> <i>(OpenPhish)</i>", res.get("openphish"), format_phish_url, 8,
+                joined=True)
+        otx = [v for k, v in res.items() if k.startswith("otx:") and isinstance(v, dict) and v["count"]]
+        section("🕸 <b>Báo cáo threat intel nhắc tới domain</b> <i>(AlienVault OTX)</i>", otx, format_otx_domain, 3)
+    if p := res.get("pay"):
+        if isinstance(p, dict):
+            blocks.append(f"💰 <b>Tiền chuộc ghi nhận on-chain</b> (ransomwhe.re): <b>${p['usd']:,.0f}</b> qua "
+                          f"{p['payments']} giao dịch, {p['addresses']} ví")
     recent = res.get("recent")
     if isinstance(recent, list):
         recent = [v for v in recent if q.kind != "country" or v["country"] == "VN"]
@@ -202,7 +278,9 @@ async def smart_search(text: str, cfg: Config, watcher=None) -> tuple[Query, lis
             f"<code>{c}</code> ({n})" for c, n in mentioned.most_common(4)) + "\n<i>Tra sâu: /research CVE-…</i>")
     failed = [f"{k} ({_err(v)})" for k, v in res.items() if isinstance(v, Exception)
               and not k.startswith("hr:") and k not in ("victims", "breaches", "leaks", "lookalike", "cves", "ghsa",
-                                                        "exploits", "group", "gdelt")]
+                                                        "exploits", "group", "gdelt", "pay", "phish",
+                                                        "openphish", "kev_vendor", "msf")
+              and not k.startswith("otx:")]
     if failed:
         blocks.append("<i>Nguồn lỗi/giới hạn: " + html.escape(", ".join(failed)) + "</i>")
     return q, blocks

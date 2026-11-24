@@ -140,3 +140,28 @@ def format_exploit(e: dict) -> str:
     cves = f" · {', '.join(e['cves'][:2])}" if e["cves"] else ""
     return (f'• <a href="{html.escape(e["url"])}">{html.escape(e["title"][:110])}</a>'
             f" — {e['date']} · {html.escape(e['type'])}/{html.escape(e['platform'])}{cves}")
+
+
+def format_technique(t: dict) -> str:
+    """One ATT&CK technique: red-team test to reproduce it, blue-team detection rules to catch it."""
+    tests = f"{t['tests']} bài test Atomic" if t["tests"] else "chưa có bài test Atomic"
+    plat = f" · {html.escape(', '.join(t['platforms']))}" if t["platforms"] else ""
+    lines = [f'🎯 <b>{html.escape(t["id"])}</b> {html.escape(t["name"])} · <i>{html.escape(t["tactic"])}</i>',
+             f"{tests}{plat} · " + f'<a href="{html.escape(t["url"])}">MITRE</a>'
+             + (f' · <a href="{html.escape(t["atomic"])}">mã test (red team)</a>' if t["tests"] else "")
+             + f' · <a href="https://github.com/SigmaHQ/sigma/search?q={html.escape(t["id"])}">luật Sigma (blue team)</a>']
+    return "\n".join(lines)
+
+
+def format_lolbas(l: dict) -> str:
+    cats = html.escape(", ".join(l["categories"]) or "?")
+    mitre = html.escape(", ".join(l["mitre"][:6]))
+    return (f'🦾 <b>{html.escape(l["name"])}</b> (LOLBAS, Windows): {html.escape(l["description"][:160])}\n'
+            f"Bị lạm dụng để: {cats} · {l['commands']} cách dùng · MITRE {mitre}\n"
+            f'<a href="{html.escape(l["url"])}">chi tiết LOLBAS</a> (lệnh cụ thể xem trên trang gốc)')
+
+
+def format_gtfo(g: dict) -> str:
+    return (f'🐧 <b>{html.escape(g["name"])}</b> (GTFOBins, Linux): {html.escape(", ".join(g["functions"]))}\n'
+            f'Ngữ cảnh: {html.escape(", ".join(g["contexts"]))} · '
+            f'<a href="{html.escape(g["url"])}">chi tiết GTFOBins</a>')
