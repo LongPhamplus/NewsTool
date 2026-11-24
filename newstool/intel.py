@@ -112,6 +112,62 @@ async def search_bing(query: str, limit: int = 8) -> list[dict]:
     return sorted(items, key=lambda n: n["published"], reverse=True)[:limit]
 
 
+# ---------- general web search (Bing web results as RSS, no key) ----------
+async def search_web(query: str, limit: int = 10) -> list[dict]:
+    """Web pages (blogs, docs, write-ups), not only news. Uses Brave Search when BRAVE_API_KEY is set
+    (free key at brave.com/search/api, real site: operators), otherwise Bing RSS. published = 0 (no date)."""
+    key = os.environ.get("BRAVE_API_KEY", "").strip()
+    if key:
+        async with _client() as c:
+            r = await c.get("https://api.search.brave.com/res/v1/web/search",
+                            params={"q": query, "count": min(limit, 20)},
+                            headers={"X-Subscription-Token": key, "Accept": "application/json"})
+        if r.status_code in (401, 403, 429):
+            raise RateLimited("Brave Search từ chối (sai khóa hoặc hết lượt)")
+        r.raise_for_status()
+        items = [{"title": clean_text(x.get("title", "")), "url": x.get("url", ""),
+                  "source": urlparse(x.get("url", "")).netloc.removeprefix("www."),
+                  "summary": clean_text(x.get("description", ""))[:400], "published": 0}
+                 for x in (r.json().get("web") or {}).get("results", [])]
+        return [i for i in items if i["url"].startswith("http")][:limit]
+    async with _client() as c:
+        r = await c.get("https://www.bing.com/search", params={"q": query, "format": "rss", "setlang": "en"})
+        r.raise_for_status()
+    out = []
+    for e in feedparser.parse(r.content).entries:
+        link = e.get("link", "")
+        host = urlparse(link).netloc.removeprefix("www.")
+        if not link.startswith("http") or host.endswith("bing.com"):
+            continue
+        out.append({"title": clean_text(e.get("title", "")), "url": link, "source": host,
+                    "summary": clean_text(e.get("description", ""))[:400], "published": 0})
+    return out[:limit]
+
+
+_DDG_TITLE = re.compile(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.S)
+_DDG_SNIPPET = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.S)
+
+
+async def search_ddg(query: str, limit: int = 10) -> list[dict]:
+    """Second web engine (DuckDuckGo HTML). It throttles scripted use quickly, so callers treat errors as optional."""
+    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"},
+                                 timeout=20, follow_redirects=True) as c:
+        r = await c.get("https://html.duckduckgo.com/html/", params={"q": query})
+    if r.status_code != 200 or "result__a" not in r.text:
+        raise RateLimited("DuckDuckGo đang giới hạn truy cập, thử lại sau")
+    snippets = _DDG_SNIPPET.findall(r.text)
+    out = []
+    for i, (href, title) in enumerate(_DDG_TITLE.findall(r.text)):
+        target = parse_qs(urlparse(html.unescape(href)).query).get("uddg", [""])[0]
+        if not target.startswith("http") or "duckduckgo.com" in target:
+            continue
+        out.append({"title": clean_text(title), "url": target, "source": urlparse(target).netloc.removeprefix("www."),
+                    "summary": clean_text(snippets[i])[:400] if i < len(snippets) else "", "published": 0})
+        if len(out) >= limit:
+            break
+    return out
+
+
 # ---------- ransomware.live (leak-site tracker) ----------
 async def _rl_get(path: str) -> list[dict]:
     data = await _get_json(f"{RL_API}/{path}")

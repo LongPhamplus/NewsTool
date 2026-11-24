@@ -5,9 +5,9 @@ Threat actors / malware: MISP Galaxy clusters (threat actors, Malpedia families,
 Brand abuse: urlscan.io, OpenPhish.
 Big datasets are reduced to small indexes and cached in memory; onion links are never kept.
 """
+import asyncio
 import collections
 import html
-import os
 import re
 import time
 from datetime import datetime
@@ -17,6 +17,7 @@ import yaml
 
 from .fetcher import HEADERS
 from .intel import RateLimited, _Cache, _get_json, _ts, kev_catalog
+from .query import fold
 
 SHODAN_CVEDB = "https://cvedb.shodan.io"
 NOMISEC = "https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master/{year}/{cve}.json"
@@ -406,28 +407,34 @@ async def gtfobins(name: str) -> dict | None:
             "url": f"https://gtfobins.org/gtfobins/{stem}/"}
 
 
-# ---------- Technique explanations: what a technique is and how it works ----------
-# GitHub code search over knowledge bases (quoted phrase -> file + fragment). Needs GITHUB_TOKEN; 10 requests/min.
-KNOWLEDGE_REPOS = ["swisskyrepo/PayloadsAllTheThings", "OWASP/CheatSheetSeries", "OWASP/wstg",
-                   "carlospolop/hacktricks", "Hack-with-Github/Awesome-Hacking"]
-_knowledge: dict[str, tuple[float, list[dict]]] = {}
+# ---------- Technique explanations: paragraphs from the local knowledge index (see knowledge.py) ----------
+TERM_STOP = {"the", "and", "how", "what", "with", "for", "cua", "la", "gi", "cach", "khong", "cac", "nhung",
+             "ky", "thuat", "technique", "method", "tan", "cong", "khai", "thac", "vuot", "qua", "attack"}  # folded
+# An HTTP status code also matches what it means, so "403 bypass" finds "access control bypass" pages.
+CODE_SYNONYMS = {"301": ["301", "redirect"], "302": ["302", "redirect"], "307": ["307", "redirect"],
+                 "401": ["401", "unauthorized", "authentication"], "403": ["403", "forbidden", "access control"],
+                 "404": ["404", "not found"], "429": ["429", "rate limit"]}
 
 
-TERM_STOP = {"the", "and", "how", "what", "with", "for", "của", "là", "gì", "cách", "không", "các", "những",
-             "kỹ", "thuật", "technique", "method", "tấn", "công", "khai", "thác", "vượt", "qua", "attack"}
-
-
-def _terms(text: str) -> list[str]:
-    words = re.findall(r"[\w+.-]+", text.lower())
+def query_words(text: str) -> list[str]:
+    """Core words of a technique query, accents removed; numbers stay (403 matters)."""
+    words = re.findall(r"[\w+.-]+", fold(text).lower())
     return [w for w in words if len(w) >= 2 and w not in TERM_STOP] or words
 
 
-def _has_terms(text: str, terms: list[str]) -> bool:
-    """Most core terms must appear (whole words), so "403 bypass" does not match unrelated pages."""
+def query_groups(text: str) -> list[set[str]]:
+    """One group per core word: a text must hit most groups, so every word counts."""
+    return [set(CODE_SYNONYMS.get(w, [w])) for w in query_words(text)]
+
+
+def group_hits(text: str, groups: list[set[str]]) -> int:
     t = text.lower()
-    hits = sum(1 for w in terms if re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", t))
-    need = len(terms) if len(terms) <= 4 else -(-len(terms) * 7 // 10)  # short queries: every word counts
-    return hits >= max(1, need)
+    return sum(1 for g in groups if any(re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", t) for w in g))
+
+
+def matches_groups(text: str, groups: list[set[str]]) -> bool:
+    """Most groups must appear (all of them for up to 3), so "403 bypass" never matches "XSS filter bypass"."""
+    return bool(groups) and group_hits(text, groups) >= max(1, -(-len(groups) * 7 // 10))
 
 
 def _window(text: str, terms: list[str], width: int = 170) -> str:
@@ -439,50 +446,16 @@ def _window(text: str, terms: list[str], width: int = 170) -> str:
 
 
 async def knowledge_snippets(query: str, limit: int = 6) -> list[dict] | None:
-    """Paragraphs from HackTricks / PayloadsAllTheThings / OWASP that explain the technique. None = no token.
-
-    Tries the exact phrase, then the phrase without numbers, then the words anywhere in the file."""
-    from .intel import gh_headers
-    if not os.environ.get("GITHUB_TOKEN", "").strip():
+    """Paragraphs from HackTricks, PayloadsAllTheThings, OWASP and others. None = index not built yet."""
+    from . import knowledge
+    if not knowledge.status():
         return None
-    key = query.lower()
-    cached = _knowledge.get(key)
-    if cached and time.time() - cached[0] < 3600:
-        return cached[1]
-    terms = _terms(query)
-    nonum = " ".join(w for w in query.split() if not w.isdigit())
-    words_only = [w for w in terms if not w.isdigit()] or terms  # numbers like 301 are often not in the text
-    attempts = [f'"{query}"', f'"{nonum}"' if nonum and nonum != query else None, " ".join(words_only)]
-    terms_for = {attempts[2]: words_only} if attempts[2] else {}
-    repos = " ".join(f"repo:{r}" for r in KNOWLEDGE_REPOS)
-    out: list[dict] = []
-    seen: set[str] = set()
-    headers = gh_headers() | {"Accept": "application/vnd.github.text-match+json"}
-    async with httpx.AsyncClient(headers=HEADERS, timeout=30) as c:
-        for needle in attempts:
-            if not needle:
-                continue
-            r = await c.get("https://api.github.com/search/code",
-                            params={"q": f"{needle} {repos}", "per_page": 15}, headers=headers)
-            if r.status_code in (403, 429):
-                raise RateLimited("GitHub code search đang giới hạn (10 lần/phút), thử lại sau")
-            r.raise_for_status()
-            for item in r.json().get("items", []):
-                if item["html_url"] in seen:
-                    continue
-                need = terms_for.get(needle, terms)
-                frag = next((m.get("fragment", "") for m in item.get("text_matches", [])
-                             if _has_terms(m.get("fragment", ""), need)), None)
-                if not frag:
-                    continue
-                seen.add(item["html_url"])
-                out.append({"repo": item["repository"]["full_name"], "path": item["path"],
-                            "url": item["html_url"], "snippet": _window(frag, need)})
-            if len(out) >= 3:
-                break
-    out = out[:limit]
-    _knowledge[key] = (time.time(), out)
-    return out
+    words = query_words(query)
+    groups = query_groups(query)
+    core = groups if len(groups) <= 2 else ([g for g in groups if not any(w.isdigit() for w in g)] or groups)
+    hits = await asyncio.to_thread(knowledge.search, groups, core, limit)
+    return [{"repo": h["repo"], "path": h["path"], "url": h["url"],
+             "snippet": _window(h["paragraph"], words)} for h in hits]
 
 
 async def stackexchange(query: str, limit: int = 3) -> list[dict]:

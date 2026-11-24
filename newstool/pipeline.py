@@ -15,15 +15,20 @@ log = logging.getLogger(__name__)
 STATUS: dict[str, dict] = {}
 # In-memory index of recent items (RSS + Telegram) so /search can look through them. Never written to disk.
 RECENT: dict[str, dict] = {}
-RECENT_DAYS, RECENT_MAX = 7, 6000
+RECENT_DAYS, RECENT_MAX = 7, 10000
+SKILL_DAYS = 120  # technique write-ups stay searchable much longer: they are still useful months later
+
+
+def _keep_days(item: dict) -> int:
+    return SKILL_DAYS if "skill" in item.get("tags", []) else RECENT_DAYS
 
 
 def remember(items: list[dict]) -> None:
     for i in items:
         RECENT[i["uid"]] = i
     if len(RECENT) > RECENT_MAX:
-        cutoff = time.time() - RECENT_DAYS * 86400
-        for uid in [u for u, i in RECENT.items() if i["published"] < cutoff]:
+        now = time.time()
+        for uid in [u for u, i in RECENT.items() if i["published"] < now - _keep_days(i) * 86400]:
             del RECENT[uid]
         while len(RECENT) > RECENT_MAX:  # dicts keep insertion order: drop the oldest inserted
             del RECENT[next(iter(RECENT))]

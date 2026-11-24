@@ -119,13 +119,17 @@ Gõ kỹ thuật bằng lời, có từ như *bypass, injection, smuggling, hija
 
 | Mục | Nguồn | Nội dung |
 |---|---|---|
-| 📖 Giải thích kỹ thuật | HackTricks, PayloadsAllTheThings, OWASP cheat sheet & WSTG (tìm qua GitHub code search) | Đoạn văn trích từ kho kiến thức, kèm link tới file gốc |
-| 📰 Bài viết & nghiên cứu | Google News trong các blog kỹ thuật (PortSwigger, Medium, Hacking Articles, Assetnote, Intigriti, Detectify, SpecterOps, Trail of Bits…) và feed skill đã lưu | Tiêu đề, nguồn, ngày và tóm tắt |
+| 📖 Giải thích kỹ thuật | HackTricks, PayloadsAllTheThings, OWASP cheat sheet & WSTG, InternalAllTheThings, Awesome-Hacking, awesome-pentest (tải về và lập chỉ mục FTS5 cục bộ, cập nhật mỗi tuần) | Đoạn văn trích đúng chỗ khớp, kèm link tới file gốc |
+| 📰 Bài viết & nghiên cứu | Web (Brave nếu có `BRAVE_API_KEY`, không thì Bing) chỉ giữ trang thuộc nguồn bảo mật hoặc có thuật ngữ bảo mật rõ ràng, và bài từ các feed kỹ thuật (PortSwigger, Assetnote, Intigriti, Orange Tsai, ProjectDiscovery, 0xdf…). Feed kỹ thuật được giữ 120 ngày trong bộ nhớ | Tiêu đề, nguồn, ngày và tóm tắt; bài khớp đủ từ khóa được xếp trước |
+| 🧰 Công cụ & PoC | GitHub repository search | Repo có tên/mô tả khớp kỹ thuật, kèm số sao |
+| 💣 Exploit-DB | Exploit-DB (CSV) | Exploit có tiêu đề khớp kỹ thuật, kèm loại, nền tảng và CVE |
 | 💬 Hỏi đáp | Information Security Stack Exchange | Câu hỏi được chấp nhận, đã lọc theo từ khóa |
 
-Mục 📖 cần **`GITHUB_TOKEN`** trong `.env` (tạo fine-grained token không cần quyền). GitHub giới hạn code search
-**10 lần/phút**, nên kết quả được lưu đệm 1 giờ. Nếu không tìm thấy đoạn khớp đủ từ khóa, bot báo "chưa tìm thấy"
-thay vì đưa bài không liên quan.
+Mục 📖 đọc từ chỉ mục cục bộ trong `~/.cache/newstool/knowledge.db` (khoảng 40 MB, chỉ chứa markdown tài liệu công khai, không chứa tin tức). Lần đầu khởi động bot tải về trong vài phút; các lần sau không tốn giới hạn API nào. Biến `NEWSTOOL_KB_PATH` đổi đường dẫn.
+
+Để web có kết quả tốt hơn, đặt `BRAVE_API_KEY` trong `.env` (khóa miễn phí tại brave.com/search/api), rồi chạy `./secrets.sh encrypt`. Brave hỗ trợ `site:` thật sự, Bing thì không.
+
+Mã HTTP được hiểu theo nghĩa của nó: `403` khớp với *forbidden* và *access control*. Các nguồn web có giới hạn truy cập; nếu một nguồn bị chặn, bot ghi rõ trong dòng "Nguồn lỗi/giới hạn" thay vì im lặng. Ahmia (tìm kiếm dark web) không dùng được từ máy này nên chưa có trong /research.
 
 Feed kỹ năng có category `skill`, đẩy vào bản tóm tắt (không báo chuông). Tag `redteam` và `blueteam` được
 gắn theo từ khóa để lọc: `/sub redteam`, `/unsub blueteam`. Bài viết cũ được lấy từ bộ nhớ RSS 7 ngày gần nhất.

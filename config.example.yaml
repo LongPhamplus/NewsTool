@@ -63,6 +63,11 @@ feeds:
   - { name: Metasploit releases, url: https://github.com/rapid7/metasploit-framework/releases.atom, category: skill, every_minutes: 120, alert: local }
   - { name: Nuclei releases,    url: https://github.com/projectdiscovery/nuclei/releases.atom, category: skill, every_minutes: 120, alert: local }
   - { name: Sigma releases,     url: https://github.com/SigmaHQ/sigma/releases.atom, category: skill, every_minutes: 120, alert: local }
+  - { name: Orange Tsai (blog),  url: https://blog.orange.tw/atom.xml,           category: skill, every_minutes: 360, alert: local }
+  - { name: ProjectDiscovery blog, url: https://blog.projectdiscovery.io/rss/,     category: skill, every_minutes: 180, alert: local }
+  - { name: 0xdf (write-ups),   url: https://0xdf.gitlab.io/feed.xml,             category: skill, every_minutes: 360, alert: local }
+  - { name: Zero Day Initiative, url: https://www.zerodayinitiative.com/blog/rss.xml, category: security, every_minutes: 60, alert: local }
+  - { name: GitHub Security,    url: https://github.blog/category/security/feed/, category: security, every_minutes: 120, alert: local }
   # --- Công nghệ ---
   - { name: Hacker News 300+, url: "https://hnrss.org/frontpage?points=300",    category: tech }
   - { name: Ars Technica,     url: https://feeds.arstechnica.com/arstechnica/index, category: tech }

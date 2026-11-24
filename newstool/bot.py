@@ -242,6 +242,14 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_html("\n".join(lines))
 
 
+async def knowledge_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download/refresh the knowledge bases (HackTricks, PayloadsAllTheThings, OWASP…) into the local index."""
+    from . import knowledge
+    done = await knowledge.sync_due()
+    for repo, result in done.items():
+        log.info("kho tài liệu %s: %s", repo, result)
+
+
 async def warmup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Pre-load the big reference datasets so the first /search or /research of the day is fast."""
     from . import deep
@@ -309,6 +317,7 @@ def build(cfg: Config) -> Application:
     app.job_queue.run_repeating(feeds_job, interval=cfg.poll_minutes * 60, first=5, job_kwargs=late_ok)
     app.job_queue.run_repeating(intel_job, interval=cfg.intel_poll_minutes * 60, first=20, job_kwargs=late_ok)
     app.job_queue.run_repeating(warmup_job, interval=12 * 3600, first=60, job_kwargs=late_ok)
+    app.job_queue.run_repeating(knowledge_job, interval=6 * 3600, first=90, job_kwargs=late_ok)
     if cfg.digest_minutes > 0:
         app.job_queue.run_repeating(digest_job, interval=cfg.digest_minutes * 60, first=cfg.digest_minutes * 60,
                                     job_kwargs=late_ok)

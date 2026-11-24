@@ -18,7 +18,7 @@ from .formatter import (SEV, ago, _date, format_exploit, format_gtfo, format_hn,
                         format_news_line, format_technique)
 from .intel import (NVD_API, RateLimited, _client, _get_json, exploits_by_cve, ghsa_by_cve, group_names, kev_catalog,
                     ransomware_group, search_bing, search_darkweb_news, search_exploits, search_ghsa, search_hn,
-                    search_news, search_repos)
+                    search_news, search_repos, search_web)
 from .fetcher import clean_text
 from .query import SEC_RE, Query, fold, rank
 
@@ -277,15 +277,11 @@ async def research(query: str, watcher=None) -> list[str]:
     return blocks
 
 
-BLOG_SITES = ["portswigger.net", "hackingarticles.in", "medium.com", "infosecwriteups.com", "assetnote.io",
-              "intigriti.com", "detectify.com", "specterops.io", "trailofbits.com", "hacktricks.wiki"]
-
 CONCEPT_WORDS = {"bypass", "injection", "inject", "smuggling", "hijack", "hijacking", "poisoning", "spoofing",
                  "traversal", "escalation", "deserialization", "takeover", "enumeration", "persistence", "pivoting",
                  "pivot", "exfiltration", "evasion", "evade", "obfuscation", "technique", "method", "desync",
                  "forgery", "xss", "sqli", "ssrf", "csrf", "idor", "xxe", "ssti", "crlf", "race", "kỹ", "thuật",
                  "tấn", "công", "khai", "thác", "vượt", "qua"}
-GENERIC_TERMS = {"the", "and", "how", "what", "with", "for", "của", "là", "gì", "cách", "không", "các", "những"}
 
 
 def is_concept(query: str) -> bool:
@@ -294,35 +290,59 @@ def is_concept(query: str) -> bool:
     return len(words) >= 2 and any(w in CONCEPT_WORDS for w in words)
 
 
-TERM_STOP = GENERIC_TERMS | {"kỹ", "thuật", "technique", "method", "tấn", "công", "khai", "thác", "vượt", "qua",
-                             "attack"}
+# Security-only sources: research and write-up sites, vendor research, KBs, CERTs, exploit DBs.
+SECURITY_SITES = [
+    "portswigger.net", "book.hacktricks.wiki", "hacktricks.wiki", "owasp.org", "hackingarticles.in",
+    "intigriti.com", "detectify.com", "assetnote.io", "specterops.io", "trailofbits.com", "googleprojectzero.blogspot.com",
+    "blog.orange.tw", "projectdiscovery.io", "0xdf.gitlab.io", "zerodayinitiative.com", "labs.watchtowr.com",
+    "horizon3.ai", "synacktiv.com", "doyensec.com", "positive.security", "bishopfox.com", "nccgroup.com",
+    "cobalt.io", "hackerone.com", "bugcrowd.com", "infosecwriteups.com", "ired.team", "pentesterlab.com",
+    "root-me.org", "ctftime.org", "exploit-db.com", "cve.org", "nvd.nist.gov", "attack.mitre.org", "cisa.gov",
+    "security.stackexchange.com", "gtfobins.github.io", "lolbas-project.github.io",
+    "atomicredteam.io", "sigmahq.io", "redcanary.com", "elastic.co", "sans.org", "isc.sans.edu", "rapid7.com",
+    "talosintelligence.com", "unit42.paloaltonetworks.com", "securelist.com", "welivesecurity.com",
+    "krebsonsecurity.com", "bleepingcomputer.com", "thehackernews.com", "darkreading.com", "schneier.com",
+    "sploitus.com", "packetstormsecurity.com", "huntress.com", "dfir.report", "velocidex.com",
+]
+# Words that only appear in security writing; a page outside SECURITY_SITES needs one of them.
+STRONG_SEC = re.compile(r"pentest|penetration test|exploit|vulnerab|payload|bug bounty|red team|blue team|malware|"
+                        r"threat actor|\bctf\b|\bcve-\d|\bxss\b|\bsqli\b|\bssrf\b|\brce\b|privilege escalation|"
+                        r"infosec|appsec|hacker|hacking|mitre att|\bdetection\b|\bsigma\b|ransomware|"
+                        r"lỗ hổng|tấn công|mã độc", re.IGNORECASE)
+SEC_TAGS = {"skill", "security", "redteam", "blueteam", "vuln", "malware", "ransomware", "kev", "breach",
+            "incident", "watch"}
 
 
-def _core(query: str) -> list[str]:
-    """Words that must appear: "bypass" stays (it is the point), filler words go."""
-    words = re.findall(r"[\w+.-]+", fold(query).lower())
-    return [w for w in words if len(w) >= 2 and w not in TERM_STOP] or words
+def _security_host(url: str) -> bool:
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    return any(host == s or host.endswith("." + s) for s in SECURITY_SITES)
 
 
-def _relevant(text: str, terms: list[str]) -> bool:
-    """Text must mention most of the core terms (so "403 bypass" does not return "Chanel bypass" articles)."""
-    if not terms:
-        return False
-    t = fold(text).lower()
-    hits = sum(1 for w in terms if re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", t))
-    return hits >= max(1, -(-len(terms) * 7 // 10))
+def _is_security(n: dict) -> bool:
+    """Keep web results only when the site is a security source or the text is clearly about security."""
+    if n.get("tags") is not None:  # our own feed items: the classifier already tagged them
+        return bool(SEC_TAGS & set(n["tags"]))
+    return _security_host(n["url"]) or bool(STRONG_SEC.search(f"{n.get('title', '')} {n.get('summary', '')}"))
+
+
+def _score(n: dict, groups: list[set[str]]) -> int:
+    """Title matches count double; a page that has every word (codes included) ranks first."""
+    title = deep.group_hits(fold(n.get("title", "")), groups)
+    body = deep.group_hits(fold(f"{n.get('title', '')} {n.get('summary', '')}"), groups)
+    return 2 * title + body + (3 if body == len(groups) else 0)
 
 
 async def research_concept(query: str) -> list[str]:
-    """How a technique works: explanations from knowledge bases, write-ups from security blogs, Q&A."""
-    terms = _core(query)
-    words = [t for t in terms if not t.isdigit()] or terms  # article titles rarely repeat a number like 301
-    sites = " OR ".join(f"site:{s}" for s in BLOG_SITES)
+    """How a technique works: explanations from knowledge bases, write-ups from security blogs and the web,
+    tools on GitHub, Q&A."""
+    groups = deep.query_groups(query)
+    words = deep.query_words(query)
     res = await _run({
         "kb": deep.knowledge_snippets(query, 6),
-        "blogs": search_news(f"{' '.join(words)} ({sites})", "en", 30),
-        "en": search_news(query, "en", 20),
-        "bing": search_bing(query, 15),
+        "web": search_web(query, 15),
+        "guides": search_web(f"{query} (writeup OR pentest OR exploit)", 15),
+        "exploits": search_exploits(" ".join(words), 6),
+        "tools": search_repos(f"{' '.join(words)} in:name,description,readme", 6),
         "se": deep.stackexchange(query, 6),
     })
     blocks = [f"🔬 <b>Research kỹ thuật: {html.escape(query)}</b>"]
@@ -330,30 +350,43 @@ async def research_concept(query: str) -> list[str]:
     if isinstance(kb, Exception):
         blocks.append(f"📖 Kho kiến thức: <i>{html.escape(_err(kb))}</i>")
     elif kb is None:
-        blocks.append("<i>Muốn có đoạn giải thích từ HackTricks, PayloadsAllTheThings, OWASP: đặt "
-                      "<code>GITHUB_TOKEN</code> trong .env (xem README).</i>")
+        blocks.append("<i>Kho tài liệu (HackTricks, PayloadsAllTheThings, OWASP…) đang được tải về lần đầu, "
+                      "thử lại sau vài phút.</i>")
     elif kb:
         blocks.append("📖 <b>Giải thích kỹ thuật</b> <i>(HackTricks, PayloadsAllTheThings, OWASP)</i>\n" + "\n".join(
             f'• <a href="{html.escape(k["url"])}">{html.escape(k["repo"])}</a> · '
             f'<code>{html.escape(k["path"])}</code>\n<i>{html.escape(k["snippet"])}</i>' for k in kb))
-    pool = _ok(res, "blogs", []) + _ok(res, "en", []) + _ok(res, "bing", []) + list(RECENT.values())
-    seen, articles = set(), []
-    for n in sorted(pool, key=lambda n: -n.get("published", 0)):
+    pool = [n for n in (_ok(res, "web", []) + _ok(res, "guides", []))
+            if _is_security(n)]
+    pool += [n for n in RECENT.values() if _is_security(n)]  # feed items already tagged as security/skill
+    seen, scored = set(), []
+    for n in pool:
         text = f"{n.get('title', '')} {n.get('summary', '')}"
-        if n["url"] in seen or not _relevant(text, words):
+        if n["url"] in seen or not deep.matches_groups(fold(text), groups):
             continue
         seen.add(n["url"])
-        articles.append(n)
+        scored.append((_score(n, groups), n.get("published", 0), n))
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+    articles = [n for _, _, n in scored]
     if articles:
         lines = []
-        for n in articles[:6]:
+        for n in articles[:7]:
             summary = clean_text(n.get("summary") or "")
             summary = "" if summary.lower().startswith(n["title"].lower()[:30]) else summary[:200]
+            when = ago(n["published"]) if n.get("published") else "web"
             lines.append(f'• <a href="{html.escape(n["url"])}">{html.escape(n["title"][:120])}</a> — '
-                         f'<i>{html.escape(n.get("source") or "")}</i>, {ago(n["published"])}'
+                         f'<i>{html.escape(n.get("source") or "")}</i>, {when}'
                          + (f"\n  <i>{html.escape(summary)}</i>" if summary else ""))
         blocks.append("📰 <b>Bài viết &amp; nghiên cứu</b>\n" + "\n".join(lines))
-    se = [q for q in _ok(res, "se", []) if _relevant(f"{q['title']} {q['snippet']}", words)]
+    exploits = _ok(res, "exploits", [])
+    if exploits:
+        blocks.append("💣 <b>Exploit-DB</b>\n" + "\n".join(format_exploit(e) for e in exploits[:5]))
+    tools = [t for t in _ok(res, "tools", []) if deep.matches_groups(fold(f"{t['name']} {t['description']}"), groups)]
+    if tools:
+        blocks.append("🧰 <b>Công cụ &amp; PoC trên GitHub</b>\n" + "\n".join(
+            f'• <a href="{html.escape(t["url"])}">{html.escape(t["name"])}</a> ({t["stars"]}★)'
+            + (f"\n  <i>{html.escape(t['description'])}</i>" if t["description"] else "") for t in tools[:5]))
+    se = [q for q in _ok(res, "se", []) if deep.matches_groups(fold(f"{q['title']} {q['snippet']}"), groups)]
     if se:
         blocks.append("💬 <b>Hỏi đáp (Information Security Stack Exchange)</b>\n" + "\n".join(
             f'• <a href="{html.escape(q["url"])}">{html.escape(q["title"][:110])}</a> ({q["score"]}▲)'
@@ -362,7 +395,7 @@ async def research_concept(query: str) -> list[str]:
         blocks.append("<i>Chưa tìm thấy bài viết khớp đủ từ khóa. Thử cách diễn đạt khác hoặc tên kỹ thuật tiếng Anh.</i>")
     blocks.append(f'🔗 <b>Tra cứu thêm</b>: <a href="https://www.google.com/search?q={quote_plus(query + " site:book.hacktricks.wiki OR site:portswigger.net")}">Google (HackTricks, PortSwigger)</a>'
                   f' · <a href="https://github.com/search?q={quote_plus(chr(34) + query + chr(34))}&type=code">GitHub code</a>')
-    failed = [k for k in ("blogs", "en", "bing", "se") if isinstance(res.get(k), Exception)]
+    failed = [k for k in ("web", "guides", "exploits", "tools", "se") if isinstance(res.get(k), Exception)]
     if failed:
         blocks.append("<i>Nguồn lỗi/giới hạn: " + html.escape(", ".join(f"{k} ({_err(res[k])})" for k in failed)) + "</i>")
     return blocks
